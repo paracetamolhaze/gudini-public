@@ -1,0 +1,11 @@
+# Карусели формата @siddhantt.ai (ветка carousel-sid): слой поверх запущенного образа — кнопка «Создать»
+# делает карусель целиком сама (тема и факты через свой мост Claude, обложка через мост картинок Codex,
+# скриншоты источников, 9 слайдов, ролик для пробного Reels). Сборка: bash carousel/deploy/site/prepare.sh
+# в gudini-work/carousel-sid, затем docker build --build-arg BASE=<запущенный образ> -t <тег ниже> carousel/deploy/site/build.
+# Мост каруселей к Claude работает на ПК: gudini-work\carousel-runner\carousel\bridge\start-bridge.ps1 (порт 43143),
+# его поднимает deploy\start-gudini.ps1. Подключается последним в цепочке compose; откат — та же команда без этого файла.
+services:
+  gudini-site:
+    image: gudini-gudini-site:carousel-sid-20261028
+    environment:
+      CAROUSEL_CLAUDE_URL: http://host.docker.internal:43143

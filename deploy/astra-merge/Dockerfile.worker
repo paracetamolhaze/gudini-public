@@ -1,0 +1,7 @@
+# Воркер с одной «Астрой»: слой поверх ЗАПУЩЕННОГО образа (воркер идёт на tsx, сборка не нужна). Проверки — импорт
+# конвейера и образцы учебника Астры: опечатка в правке роняет сборку, а не первый монтаж.
+ARG BASE
+FROM ${BASE}
+COPY overlay/ /app/
+RUN npx tsx -e 'import("./lib/pipeline.ts").then(() => console.log("конвейер грузится"))'
+RUN cd astra-engine && npx tsx director/check-examples.ts

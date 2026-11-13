@@ -1,0 +1,5 @@
+# Карусели 7.11: картинки рисуются одновременно и пока Claude проверяет факты (коммит ef1579d ветки carousel-sid) —
+# слой поверх gudini-gudini-site:opus-20261107b. Откат — та же команда up без этого файла (before-carousel-images-20261107).
+services:
+  gudini-site:
+    image: gudini-gudini-site:carousel-images-20261107

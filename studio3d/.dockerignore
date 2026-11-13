@@ -1,0 +1,7 @@
+# The image is built from studio3d/ alone (see deploy/Dockerfile): dependencies come from npm ci,
+# renders and scratch work stay on the machine that made them.
+node_modules
+out
+.work
+public/dev
+deploy/site/build

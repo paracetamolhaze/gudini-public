@@ -1,0 +1,5 @@
+Gudini (your-site.example) is a web studio for creators: it turns a recorded talking-head video into a finished short and lets the creator post it to their own TikTok account.
+
+Login Kit (user.info.basic): the creator connects their TikTok account via OAuth in Settings. We use user.info.basic with creator_info to show the creator's nickname and avatar on the publish screen, so they see which account the video goes to.
+
+Content Posting API, Direct Post (video.publish): on the publish screen the creator previews the video, edits the caption, selects the privacy level from the options returned by creator_info (nothing is preselected), sets comment/duet/stitch permissions, picks the cover frame, declares commercial content (your brand or branded content) and confirms TikTok's Music Usage Confirmation and Branded Content Policy. Only then the video is uploaded (FILE_UPLOAD) and posted; we poll the publish status and show the result. No other TikTok data is read or stored.

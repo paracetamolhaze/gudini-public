@@ -1,0 +1,248 @@
+import { spawn } from "child_process";
+
+export function ffmpegBin(): string {
+  return process.env.FFMPEG_PATH || "ffmpeg";
+}
+
+export function ffprobeBin(): string {
+  return process.env.FFPROBE_PATH || "ffprobe";
+}
+
+export type ProbeInfo = {
+  duration: number; // секунды
+  width: number;
+  height: number;
+  /** размеры, как кадр показывается: с учётом метаданных поворота (телефоны пишут 1920×1080 + rotate=90) */
+  displayWidth: number;
+  displayHeight: number;
+  hasAudio: boolean;
+  fps: number;
+  audioDuration: number;
+  /** длительность именно видеодорожки: у записи из браузера она может оборваться раньше звука */
+  videoDuration: number;
+};
+
+/** Точная длительность файла (для webm с камеры метаданные врут — мерим по аудио). */
+export async function probeDuration(file: string): Promise<number> {
+  const out = await runCapture(ffprobeBin(), [
+    "-v", "quiet",
+    "-print_format", "json",
+    "-show_format",
+    file,
+  ]);
+  const json = JSON.parse(out);
+  return parseFloat(json.format?.duration ?? "0") || 0;
+}
+
+export async function probe(file: string): Promise<ProbeInfo> {
+  const out = await runCapture(ffprobeBin(), [
+    "-v", "quiet",
+    "-print_format", "json",
+    "-show_format", "-show_streams",
+    file,
+  ]);
+  const json = JSON.parse(out);
+  const video = (json.streams ?? []).find((s: any) => s.codec_type === "video");
+  const audio = (json.streams ?? []).find((s: any) => s.codec_type === "audio");
+  if (!video) throw new Error("В файле не найден видеопоток");
+  const fpsRaw = String(video.avg_frame_rate ?? video.r_frame_rate ?? "0/1");
+  const [num, den] = fpsRaw.split("/").map(Number);
+  const rotation = Math.abs(
+    Number((video.side_data_list ?? []).find((d: any) => d?.rotation !== undefined)?.rotation ?? video.tags?.rotate ?? 0),
+  );
+  const rotated = rotation % 180 === 90;
+  return {
+    duration: parseFloat(json.format?.duration ?? video.duration ?? "0"),
+    width: video.width,
+    height: video.height,
+    displayWidth: rotated ? video.height : video.width,
+    displayHeight: rotated ? video.width : video.height,
+    hasAudio: Boolean(audio),
+    fps: den ? num / den : 0,
+    audioDuration: audio ? parseFloat(audio.duration ?? json.format?.duration ?? "0") || 0 : 0,
+    videoDuration: parseFloat(video.duration ?? json.format?.duration ?? "0") || 0,
+  };
+}
+
+/** Ищет чёрные кадры в маленьком окне вокруг монтажной точки (blackdetect, без AI). */
+export async function detectBlackNear(file: string, cwd: string, at: number): Promise<boolean> {
+  const start = Math.max(0, at - 0.15);
+  const stderr = await new Promise<string>((resolve, reject) => {
+    const proc = spawn(
+      ffmpegBin(),
+      ["-hide_banner", "-ss", String(start), "-t", "0.3", "-i", file,
+       "-vf", "blackdetect=d=0.08:pic_th=0.98", "-an", "-f", "null", "-"],
+      { cwd, windowsHide: true },
+    );
+    let out = "";
+    proc.stderr.on("data", (d) => (out += d));
+    proc.on("error", reject);
+    proc.on("close", () => resolve(out));
+  });
+  return stderr.includes("black_start");
+}
+
+function runCapture(bin: string, args: string[], cwd?: string): Promise<string> {
+  return new Promise((resolve, reject) => {
+    const proc = spawn(bin, args, { cwd, windowsHide: true });
+    let stdout = "";
+    let stderr = "";
+    proc.stdout.on("data", (d) => (stdout += d));
+    proc.stderr.on("data", (d) => (stderr += d));
+    proc.on("error", reject);
+    proc.on("close", (code) => {
+      if (code === 0) resolve(stdout);
+      else reject(new Error(`${bin} завершился с кодом ${code}: ${stderr.slice(-800)}`));
+    });
+  });
+}
+
+/**
+ * Запускает ffmpeg и сообщает прогресс (0..1) по -progress pipe:1.
+ * cwd задаётся, чтобы в фильтрах использовать относительные пути (важно для ass= на Windows).
+ */
+export function runFfmpeg(
+  args: string[],
+  opts: { cwd?: string; totalDurationSec?: number; onProgress?: (fraction: number) => void } = {},
+): Promise<void> {
+  return new Promise((resolve, reject) => {
+    const fullArgs = ["-hide_banner", "-y", ...args, "-progress", "pipe:1", "-nostats"];
+    const proc = spawn(ffmpegBin(), fullArgs, { cwd: opts.cwd, windowsHide: true });
+    let stderr = "";
+    proc.stderr.on("data", (d) => {
+      stderr += d;
+      if (stderr.length > 8000) stderr = stderr.slice(-4000);
+    });
+    proc.stdout.on("data", (chunk) => {
+      const text = String(chunk);
+      const match = text.match(/out_time_us=(\d+)/g);
+      if (match && opts.totalDurationSec && opts.onProgress) {
+        const last = match[match.length - 1];
+        const us = parseInt(last.split("=")[1], 10);
+        opts.onProgress(Math.min(1, us / 1e6 / opts.totalDurationSec));
+      }
+    });
+    proc.on("error", reject);
+    proc.on("close", (code, signal) => {
+      if (code === 0) resolve();
+      else if (code === null) {
+        reject(
+          new Error(
+            `ffmpeg был остановлен системой (сигнал ${signal ?? "неизвестен"}) — почти всегда это нехватка ОЗУ на сервере. Увеличьте память сервиса или упростите монтаж.`,
+          ),
+        );
+      } else reject(new Error(`ffmpeg завершился с кодом ${code}: ${stderr.slice(-800)}`));
+    });
+  });
+}
+
+/** Извлекает аудио в WAV 16 кГц моно (для распознавания речи), с необязательной обрезкой. */
+export async function extractAudio(
+  inputFile: string,
+  outputWav: string,
+  cwd: string,
+  trim?: { start: number; duration: number },
+): Promise<void> {
+  const pre = trim ? ["-ss", String(trim.start), "-t", String(trim.duration)] : [];
+  await runFfmpeg([...pre, "-i", inputFile, "-vn", "-ac", "1", "-ar", "16000", "-c:a", "pcm_s16le", outputWav], { cwd });
+}
+
+/**
+ * Посекундный RMS (дБFS) звуковой дорожки: для проверки уровня записи до платных стадий.
+ * Тишина/−inf → −100. При ошибке ffmpeg — пустой список (проверка пропускается).
+ */
+export async function measureRmsWindows(file: string, cwd: string, windowSec = 1): Promise<number[]> {
+  const rate = 16000;
+  const stderr = await new Promise<string>((resolve) => {
+    const proc = spawn(
+      ffmpegBin(),
+      [
+        "-hide_banner", "-v", "info", "-i", file, "-vn",
+        "-af",
+        `aresample=${rate},asetnsamples=n=${Math.round(rate * windowSec)},` +
+          "astats=metadata=1:reset=1:measure_perchannel=none:measure_overall=RMS_level," +
+          "ametadata=mode=print:key=lavfi.astats.Overall.RMS_level",
+        "-f", "null", "-",
+      ],
+      { cwd, windowsHide: true },
+    );
+    let out = "";
+    proc.stderr.on("data", (d) => (out += d));
+    proc.on("error", () => resolve(""));
+    proc.on("close", () => resolve(out));
+  });
+  const values: number[] = [];
+  for (const m of stderr.matchAll(/lavfi\.astats\.Overall\.RMS_level=(-?[\d.]+|-inf|inf|nan)/g)) {
+    const v = parseFloat(m[1]);
+    values.push(Number.isFinite(v) ? Math.max(-100, v) : -100);
+  }
+  return values;
+}
+
+export type SilenceEvent = { start: number; end: number };
+
+/** Все участки тишины в файле (silencedetect). */
+export async function detectSilences(file: string, cwd: string, duration: number): Promise<SilenceEvent[]> {
+  const stderr = await new Promise<string>((resolve, reject) => {
+    const proc = spawn(
+      ffmpegBin(),
+      // -40 дБ и от 0.6 с пропускали вдох между фразами (громче порога, короче 0.6 с):
+      // такие паузы оставались в ролике провалами. Порог мягче, минимум короче;
+      // сами решения о паузах принимает планировщик, а не детектор.
+      ["-hide_banner", "-i", file, "-af", "silencedetect=n=-34dB:d=0.3", "-f", "null", "-"],
+      { cwd, windowsHide: true },
+    );
+    let out = "";
+    proc.stderr.on("data", (d) => (out += d));
+    proc.on("error", reject);
+    proc.on("close", () => resolve(out));
+  });
+
+  const events: { start: number; end?: number }[] = [];
+  for (const line of stderr.split("\n")) {
+    const s = line.match(/silence_start:\s*([\d.]+)/);
+    const e = line.match(/silence_end:\s*([\d.]+)/);
+    if (s) events.push({ start: parseFloat(s[1]) });
+    else if (e && events.length) events[events.length - 1].end = parseFloat(e[1]);
+  }
+  return events.map((ev) => ({ start: ev.start, end: ev.end ?? duration }));
+}
+
+/**
+ * По списку тишин строит сегменты речи, которые остаются в ролике:
+ * обрезает края и вырезает длинные паузы внутри (оставляя естественный зазор).
+ */
+export function buildKeepSegments(
+  silences: SilenceEvent[],
+  duration: number,
+): { start: number; end: number }[] {
+  let start = 0;
+  let end = duration;
+  const first = silences[0];
+  if (first && first.start <= 0.3 && first.end < duration) start = Math.max(0, first.end - 0.25);
+  const last = silences[silences.length - 1];
+  if (last && last.end >= duration - 0.5 && last.start > start) end = Math.min(duration, last.start + 0.5);
+  if (end - start < 3) {
+    start = 0;
+    end = duration;
+  }
+
+  // внутренние паузы > 1.2 сек ужимаем до ~0.45 сек (0.25 до + 0.2 после)
+  const cuts: { start: number; end: number }[] = [];
+  for (const sil of silences) {
+    const s = Math.max(sil.start, start);
+    const e = Math.min(sil.end, end);
+    if (e - s > 1.2 && s > start + 0.5 && e < end - 0.5) {
+      cuts.push({ start: s + 0.25, end: e - 0.2 });
+    }
+  }
+
+  const segments: { start: number; end: number }[] = [];
+  let cursor = start;
+  for (const cut of cuts) {
+    if (cut.start > cursor + 0.2) segments.push({ start: cursor, end: cut.start });
+    cursor = Math.max(cursor, cut.end);
+  }
+  if (end > cursor + 0.2) segments.push({ start: cursor, end });
+  return segments.length ? segments : [{ start, end }];
+}

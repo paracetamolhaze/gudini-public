@@ -1,0 +1,42 @@
+# Контейнер «3Д» отдельным проектом gudini3d: его запуск и перезапуск не трогают сайт и воркер.
+# Образ собирается заранее (см. README.md рядом), здесь только запуск:
+#   docker compose -f studio3d/deploy/compose.yml up -d
+# Сайт виден по имени gudini-site, потому что контейнер подключён к сети основного проекта gudini.
+name: gudini3d
+
+services:
+  gudini-3d:
+    image: gudini-3d:latest
+    container_name: gudini-3d
+    restart: unless-stopped
+    # tini первым процессом: подбирает осиротевшие процессы Chrome после рендеров (node на этом месте их не подбирает)
+    # и передаёт SIGTERM исполнителю
+    init: true
+    # Тот же .env, что у сайта и воркера: пароль сайта, ключ ElevenLabs, токен моста Claude.
+    env_file: ../../.env
+    environment:
+      # по внутренней сети Docker, как воркер; GUDINI_URL из .env здесь не действует
+      GUDINI_URL: http://gudini-site:3000
+      # мост Claude на Windows (studio3d/bridge), слушает только 127.0.0.1 хоста
+      STUDIO3D_CLAUDE_URL: http://host.docker.internal:43135
+      STUDIO3D_WORK: /data/work
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    # те же DNS, что у сайта и воркера: ElevenLabs и YouTube из контейнера
+    dns:
+      - 1.1.1.1
+      - 8.8.8.8
+    volumes:
+      - gudini3d-data:/data
+    # Chrome рендера держит кадры в общей памяти
+    shm_size: "2gb"
+    # из 12 ядер ПК: остальное остаётся сайту, воркеру и самому Windows
+    cpus: 8
+
+networks:
+  default:
+    name: gudini_default
+    external: true
+
+volumes:
+  gudini3d-data:

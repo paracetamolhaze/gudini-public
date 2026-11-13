@@ -1,0 +1,31 @@
+{
+  "name": "studio3d",
+  "private": true,
+  "type": "module",
+  "description": "Монтаж «3Д»: сценарий и режиссура Claude, озвучка ElevenLabs, воксельная 3D-сцена на Remotion",
+  "scripts": {
+    "studio": "remotion studio src/index.ts",
+    "typecheck": "tsc --noEmit -p ."
+  },
+  "dependencies": {
+    "@react-three/fiber": "9.2.0",
+    "@remotion/bundler": "4.0.536",
+    "@remotion/cli": "4.0.536",
+    "@remotion/fonts": "4.0.536",
+    "@remotion/media": "4.0.536",
+    "@remotion/renderer": "4.0.536",
+    "@remotion/three": "4.0.536",
+    "react": "19.1.1",
+    "react-dom": "19.1.1",
+    "remotion": "4.0.536",
+    "three": "0.178.0",
+    "zod": "3.25.76"
+  },
+  "devDependencies": {
+    "@types/node": "22.18.1",
+    "@types/react": "19.1.12",
+    "@types/three": "0.178.1",
+    "tsx": "4.20.5",
+    "typescript": "5.9.2"
+  }
+}

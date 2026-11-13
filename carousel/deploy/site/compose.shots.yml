@@ -1,0 +1,5 @@
+# Карусели 3.11: скриншоты источников прячут плавающие меню без сдвига вёрстки (коммит 95fb427 ветки carousel-sid) —
+# слой поверх gudini-gudini-site:news-cover-a2-20261103. Откат — та же команда up без этого файла (before-carousel-shots-20261103).
+services:
+  gudini-site:
+    image: gudini-gudini-site:carousel-shots-20261103

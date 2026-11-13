@@ -1,0 +1,5 @@
+# Карусели: подпись держится на двух предложениях с фактами, третье до вопроса ловит автопроверка (коммит 88db7c8).
+# Подключается последним, после compose.styles-fix2.yml; откат — без этого файла (before-carousel-caption2-20261102).
+services:
+  gudini-site:
+    image: gudini-gudini-site:carousel-caption2-20261102

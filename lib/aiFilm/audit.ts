@@ -1,0 +1,986 @@
+import type { CharacterProfile, FilmShot, ObjectState, PlanIssue, StoryBeat, StoryBible, StoryEvent } from "./types";
+
+/**
+ * Разбор готового плана на противоречия — все известные классы разом, до генерации.
+ *
+ * Появился после того, как дефекты находились по одному, каждый после оплаченного ролика:
+ * камера сверху и снизу в одном промпте, ракурс «из-за плеча» с камерой перед героем,
+ * склейка внутри непрерывного кадра. Проверка бесплатна и не требует ни Claude, ни Veo,
+ * поэтому запускается на каждом плане.
+ *
+ * Здесь только то, что видно из самого плана. Художественное качество и «интересно ли это
+ * смотреть» отсюда не проверяются.
+ */
+
+const isAi = (b: StoryBeat) => b.displayMode !== "author";
+
+/**
+ * Событие-механизм: система, ИИ, камера, помощник или сама машина что-то распознаёт, решает,
+ * вызывает, объявляет. Такой механизм честно снять нельзя, если справка его не подтверждает:
+ * кадр выдумает, кто и как принял решение. В ролике про робот-такси так появились поворот
+ * линзы к пистолету с красной тревогой и панель, сама играющая объявление, хотя по справке
+ * машину заглушили и о неисправности сказали сотрудники компании.
+ */
+const DEVICE_AGENCY =
+  /\b(?:system|systems|software|algorithm|ai|a\.i\.|artificial intelligence|neural|camera|cameras|sensor|sensors|assistant|autopilot|robot|robotaxi|the car|the cars|the vehicle|the vehicles|the taxi|computer|waymo|tesla)\b[^.;]{0,60}?\b(?:detects?|detected|recogni[sz]es?|recogni[sz]ed|registers?|registered|identif(?:y|ies|ied)|decides?|decided|triggers?|triggered|activates?|activated|alerts?|alerted|announces?|announced|notif(?:y|ies|ied)|calls?|called|contacts?|contacted|locks?|locked|chooses?|chose|selects?|selected|plans?|planned|prepares?|prepared|tricks?|tricked|deceives?|deceived|lies|lied|tells?|told|warns?|warned|reports?|reported|flags?|flagged|launches?|launched|initiates?|initiated)\b/i;
+/** Видимая реакция устройства, которой в кадре берутся доказывать механизм. */
+const DEVICE_REACTION = /\b(?:swivels?|swivel(?:l)?ing|blinks?|blinking|glows?|glowing|lights? up|flashes|flashing|beeps?|scans?|scanning|indicator|alert|alarm|warning light|red light)\b/i;
+/** Человек как исполнитель действия в цитате справки. */
+const HUMAN_AGENT = /сотрудник|оператор|работник|персонал|диспетчер|полицейск|люди\b|человек|employee|staff|operator|worker|dispatcher|officer|police|human|person\b|people/i;
+/** Роль, которая по возрасту или полу не для постоянного персонажа. */
+const ROLE_OTHER_PERSON = /подрост|\bteen|ребён|ребен|мальчик|девоч|девуш|женщин|\bgirl|\bwoman|\bboy\b|\bchild|\bkid\b|elderly|старик|пожил|старуш|\d{1,2}-летн/i;
+
+const stemsOf = (t: string) => new Set(t.toLowerCase().replace(/ё/g, "е").split(/[^\p{L}\p{N}]+/u).filter((w) => w.length >= 4).map((w) => w.slice(0, 5)));
+
+/** Есть ли цитата в справке: большинство её значимых слов встречается в одном из фактов. */
+export function factMatches(quote: string, facts: string[]): boolean {
+  const q = stemsOf(quote);
+  if (q.size < 3) return false;
+  return facts.some((f) => {
+    const fs = stemsOf(f);
+    let common = 0;
+    for (const w of q) if (fs.has(w)) common++;
+    return common / q.size >= 0.5;
+  });
+}
+
+/** Событие приписывает действие системе, а не человеку. */
+export function mechanismEvent(e: Pick<StoryEvent, "observable" | "objects"> & Partial<Pick<StoryEvent, "reviewedMechanism">>): boolean {
+  return e.reviewedMechanism === true || DEVICE_AGENCY.test(`${e.observable}. ${e.objects.map((o) => `${o.id.replace(/[-_]+/g, " ")} ${o.before} ${o.after}`).join(". ")}`);
+}
+
+/**
+ * Статус факта после сверки со справкой: «подтверждено» и «опровергнуто» требуют цитаты,
+ * которая есть в справке; без неё событие считается рассказом автора.
+ */
+export function effectiveBasis(e: Pick<StoryEvent, "basis" | "basisFact" | "observable" | "objects">, facts: string[]): "confirmed" | "told" | "contradicted" {
+  const b = e.basis ?? "told";
+  if (b === "told") return "told";
+  if (!facts.length || !factMatches(e.basisFact ?? "", facts)) return "told";
+  // Совпадение цитаты не есть смысловая поддержка. Одно расхождение ловится наверняка: событие
+  // приписывает действие системе, а цитата называет исполнителем человека — сотрудников,
+  // оператора, полицию. Такая цитата опровергает механизм, а не подтверждает его.
+  if (b === "confirmed" && mechanismEvent(e) && HUMAN_AGENT.test(e.basisFact ?? "")) return "contradicted";
+  return b;
+}
+
+/**
+ * Обязательно ли событие к ПОКАЗУ. Обязательность для рассказа и обязательность показа —
+ * разные вещи: неподтверждённый механизм и опровергнутое справкой утверждение показывать нельзя,
+ * даже если без них история не рассказывается. Их несёт голос, а видимый исход — отдельное событие.
+ */
+export function mustShowEvent(e: StoryEvent, facts: string[], documentary = true): boolean {
+  if (!e.required || !e.id || !e.objects.length) return false;
+  // событие без перехода — обстановка, показать его как событие нельзя; об этом отдельный запрет
+  if (!e.objects.some((o) => objectRole(o) === "change")) return false;
+  const basis = effectiveBasis(e, facts);
+  if (basis === "contradicted") return false;
+  // Ограничение относится к фактическим утверждениям документальной истории: скрытый механизм
+  // и причина без подтверждения. В вымышленной истории и условном примере постановочный
+  // механизм — часть постановки, а не утверждение о реальном событии.
+  if (documentary && basis !== "confirmed" && mechanismEvent(e)) return false;
+  return true;
+}
+
+/** Документальная история: новость или реконструкция реального события. */
+export function isDocumentary(bible: Pick<StoryBible, "storyType">): boolean {
+  return bible.storyType === "news" || bible.storyType === "history";
+}
+
+/** Слова состояния, у которых есть направление: обратно они не отыгрываются. */
+const DAMAGED = /\b(?:torn|shredded|ripped|broken|smashed|cracked|burnt|burned|spilled|collapsed|deflated)\b/i;
+const INTACT = /\b(?:intact|whole|unopened|sealed|new|full|folded|packed|closed)\b/i;
+
+/** Просьбы к генератору показать читаемый текст — он их не выполняет. */
+/**
+ * Прямая просьба показать РАЗБОРЧИВЫЙ текст: это Veo не выполняет, и кадр выходит с кашей
+ * вместо букв. Запрет.
+ */
+// Заголовок документа, который «видно»: доказательство сцены тогда — прочитанные слова.
+// Так прошла сцена «printed page with the club's LLC registration heading visible on top».
+const READABLE_HARD = /\b(?:reads? "|legible|readable|the words?|caption|subtitle|text (?:on|saying)|label saying|clearly shows the (?:price|number|name)|(?:heading|headline|title|letterhead)\b[^.;]{0,24}\b(?:visible|shown|showing))\b/i;
+/**
+ * Экран или бумага в кадре с содержимым. Снять это можно — подпись выйдет нечитаемой, и
+ * обычно это не мешает. Прежде сюда попадало и «screen showing a product photo», и такой
+ * кадр запрещался целиком; теперь это замечание, а не запрет.
+ */
+const READABLE_SOFT = /\bscreen (?:showing|displaying)\b|\bproduct page\b|\blisting\b/i;
+/**
+ * Слово, которое должно читаться, названо прямо: «a stamp reading DENIED», «a DENIED stamp».
+ * Без флага i: заглавные буквы здесь и есть признак надписи.
+ */
+const READABLE_WORD = /\b(?:reads?|reading|saying|says|marked|stamped)\s+["“]?[A-Z]{3,}\b|\b[A-Z]{4,}\s+(?:stamp|sign|label|banner|mark|seal|notice)\b/;
+/** Предмет сам по себе не запрещён: квитанцию можно скомкать, если её не просят прочитать. */
+const UNREADABLE = /\bunreadable\b|\billegible\b|\bblurred\b|\bout of focus\b|\bnot readable\b/i;
+
+/** Движение камеры. Вместе со словом static — противоречие. */
+const CAMERA_MOVES = /\b(?:pans?|tilts?|tracks?|dollies|dolly|pushes in|pulls back|moves? (?:with|toward|away)|follows?|orbits?|circles?|cranes?|zooms?)\b/i;
+
+/** Сцена объявляет себя происходящей раньше: флешбэк в коротком ролике читается как ошибка. */
+const EARLIER = /\bbefore the (?:jump|flight|fall|launch|flare|drop)\b|\bbefore he (?:jump|jumps|jumped|left|leaps|leapt|steps|stepped)\b|\bearlier that (?:day|morning|evening|week)\b|\bflashback\b|\bback (?:at home|in the room) before\b/i;
+
+/** Поза и положение ЧЕЛОВЕКА: в состоянии предмета таких слов быть не должно. */
+const PERSON_POSE = /\b(?:standing|stands|sitting|sits|kneeling|kneels|lying|lies|walking|walks|running|runs|leaning|leans|crouching|both feet|his feet|her feet|facing)\b/i;
+/** Камера идёт за объектом. */
+const CAMERA_FOLLOWS = /\b(?:follows?|following|tracks?|tracking|stays? (?:with|beside|level with)|keeps? pace)\b/i;
+/** Видимый ориентир, по которому читается движение. */
+const MOTION_REFERENCE = /\b(?:background|backdrop|trees|wall|walls|ground|horizon|rock face|cliff face|road|kerb|curb|water|shore|buildings|fence|rails?|sliding past|slides past|moves? past|passes behind|rushes past)\b/i;
+
+/**
+ * Слова процесса: предложение описывает, КАК действие происходит, а не каким кадр начинается.
+ * «holds the envelope in frame as it is opened» — наблюдение за вскрытием, а не заявление,
+ * что конверт уже вскрыт.
+ */
+const PROCESS = /\b(?:as|while|until|when|then|during|becomes?|turns? into|being|starts? to|begins? to)\b/i;
+
+/**
+ * Прямое заявление о ПЕРВОМ кадре. Только такие куски описания камеры считаются заявлением
+ * начального состояния: «уже вскрытый конверт лежит в кадре с первого момента». Остальной
+ * текст камеры говорит, где стоит камера, и словами сцены — «beside the workbench» не
+ * означает, что предмет уже поднят над верстаком.
+ */
+const INITIAL_CLAIM = /\balready\b|\bfrom the (?:first|very first|opening) (?:moment|frame|second)\b|\bat the start of the (?:clip|shot)\b|\bfrom the outset\b/i;
+
+/** Слова продолжения: состояние не меняется, а сохраняется. */
+const CONTINUES = /\b(?:still|remains?|unchanged|same|again|as before|intact)\b/i;
+
+/** Что-то важное находится НАД человеком. */
+const OBJECT_ABOVE = /\babove (?:him|his head|gudini)\b|\boverhead\b/i;
+
+/** Глаголы действия — по их числу видно, что в сцену запихнули несколько событий сразу. */
+const ACTION_VERB =
+  /\b(?:tears?|rips?|opens?|pulls?|drops?|falls?|jumps?|steps?|lands?|throws?|breaks?|snaps?|deploys?|catches?|hits?|cuts?|lifts?|pushes?|closes?|clicks?|presses?|taps?|grabs?|releases?|climbs?|runs?|walks?|turns?|reaches?|stumbles?|kneels?|sits?|stands?)\b/gi;
+
+export type { PlanIssue } from "./types";
+/** прежнее имя типа */
+export type PlanAudit = PlanIssue;
+
+/**
+ * Показано ли событие. Проверяется по предметам, а не по словам: сцена обязана объявить
+ * тот же предмет и то же состояние после, которое обещает событие. Приземление не может
+ * закрыть событие «отзыв», потому что предметы у них разные.
+ */
+const STATE_STOP = new Set(["the", "and", "his", "her", "its", "with", "into", "onto", "from", "that", "this", "for", "are", "was", "has", "have", "been"]);
+/** Слова отрицания: они переворачивают смысл состояния и не могут молча выпадать. */
+const STATE_NEG = new Set(["not", "no", "never", "without", "none", "nothing", "cannot"]);
+
+/**
+ * Состояние как проверяемое значение: значимые слова и знак. Раньше отрицание попадало
+ * в список игнорируемых слов, поэтому «review not submitted» и «review submitted»
+ * выглядели одинаково.
+ */
+function stateTokens(s: string): { words: Set<string>; negated: boolean } {
+  const all = s.toLowerCase().split(/[^\p{L}\p{N}]+/u).filter(Boolean);
+  return {
+    words: new Set(all.filter((w) => w.length >= 3 && !STATE_STOP.has(w) && !STATE_NEG.has(w))),
+    negated: all.some((w) => STATE_NEG.has(w)),
+  };
+}
+
+/**
+ * Слова, которыми результат ОТЛИЧАЕТСЯ от исходного состояния. Именно они доказывают, что
+ * событие произошло: «phone», «review», «canopy» называют предмет разговора и есть по обе
+ * стороны перехода, поэтому из проверки убираются вместе с идентификаторами.
+ */
+function decisiveWords(before: string, after: string, ignore: string[]): Set<string> {
+  const from = stateTokens(before).words;
+  const skip = new Set(ignore.flatMap((s) => [...stateTokens(s).words]));
+  const out = new Set<string>();
+  for (const w of stateTokens(after).words) {
+    if (!from.has(w) && !skip.has(w)) out.add(w);
+  }
+  return out;
+}
+
+/**
+ * Достигнуто ли обещанное состояние: тот же знак и хотя бы одно решающее слово результата.
+ * Требовать ВСЕ слова обещания нельзя — живой английский планировщика описывает то же самое
+ * другими словами, и «screen showing a typed review» переставало закрывать «screen showing
+ * a typed review text being entered». Одного общего слова тоже мало, поэтому слова, общие
+ * с исходным состоянием, и названия предметов в счёт не идут.
+ */
+function stateReached(promised: string, got: string, from = "", ignore: string[] = []): boolean {
+  const want = stateTokens(promised);
+  if (!want.words.size) return false;
+  const have = stateTokens(got);
+  if (want.negated !== have.negated) return false;
+  const decisive = from || ignore.length ? decisiveWords(from, promised, ignore) : want.words;
+  const check = decisive.size ? decisive : want.words;
+  for (const w of check) {
+    // «unsubmitted» — это не «submitted»: приставка отрицания тоже переворачивает смысл
+    if (have.words.has(w) && !have.words.has(`un${w}`)) return true;
+  }
+  return false;
+}
+
+/**
+ * Обязательство это или сохраняемое условие. Явное поле контракта сильнее догадки; без него
+ * смотрим на сам переход: если состояние после по-прежнему содержит исходное («torn» →
+ * «still torn and flapping»), предмет сохраняется, и показывать в нём нечего. Имена предметов
+ * в проверке не участвуют вовсе — от них результат зависеть не должен.
+ */
+export function objectRole(o: ObjectState): "change" | "keep" {
+  if (o.role === "change" || o.role === "keep") return o.role;
+  const before = o.before.trim();
+  const after = o.after.trim();
+  if (!after) return "keep";
+  if (!before) return "change";
+  if (sameState(before, after)) return "keep";
+  // «Остаётся тем же»: состояние после повторяет исходное целиком и лишь помечено словом
+  // продолжения. «torn into strips» → «still torn into strips, flapping» — условие;
+  // «in the courier's hand, sealed» → «in the merchant's hand, still sealed» — переход,
+  // потому что исходное состояние повторено НЕ полностью.
+  const from = stateTokens(before).words;
+  const to = stateTokens(after).words;
+  const repeatsAll = [...from].every((w) => to.has(w));
+  return repeatsAll && CONTINUES.test(after) ? "keep" : "change";
+}
+
+/** Одно и то же состояние: те же значимые слова и тот же знак. */
+function sameState(a: string, b: string): boolean {
+  const x = stateTokens(a);
+  const y = stateTokens(b);
+  if (x.negated !== y.negated || x.words.size !== y.words.size) return false;
+  for (const w of x.words) if (!y.words.has(w)) return false;
+  return true;
+}
+
+/** Прежнее имя: совпадение по обещанному результату. */
+function stateMatches(promised: string, got: string): boolean {
+  return stateReached(promised, got);
+}
+
+/**
+ * Показано ли событие. Сверяется КОНКРЕТНЫЙ обещанный переход каждого предмета события:
+ * состояние до сцены похоже на обещанное «до», состояние после — на обещанное «после».
+ *
+ * Прежняя версия засчитывала любое изменение нужного предмета, и «достал телефон из кармана
+ * и положил на стол» закрывало событие «написал отзыв». Пустой список предметов теперь не
+ * закрывается произвольным keyMoment: событие без проверяемого доказательства — это дефект
+ * контракта, и он обрабатывается отдельно, а не превращается в успех.
+ */
+export function eventCovered(event: StoryEvent, beats: StoryBeat[], shots?: FilmShot[]): boolean {
+  if (!event.objects.length) return false;
+  let claiming = beats.filter((b) => isAi(b) && (b.eventIds ?? []).includes(event.id));
+  // С конечными запросами проверка идёт по ним, а не по намерению: бит мог остаться
+  // в таймлайне, но не попасть ни в один клип (несовместимая группа), и тогда события
+  // в ролике не будет. Клип обязан и содержать бит, и заявлять само событие.
+  if (shots) {
+    const inShots = new Set(
+      shots.filter((sh) => sh.eventIds.includes(event.id)).flatMap((sh) => sh.beatIds),
+    );
+    claiming = claiming.filter((b) => inShots.has(b.id));
+  }
+  if (!claiming.length) return false;
+  // Обязательства события — ВСЕ его переходы, а не тот предмет, чьё имя случайно попало
+  // в английское описание. Прежний выбор «названный, иначе первый» зависел от внутренних
+  // имён: сделка «деньги за чашку» под именами money/cup проверялась целиком, а под
+  // payment-token/purchased-item — наполовину. Сохраняемые условия («остаётся порванным»)
+  // обязательством не являются: показывать в них нечего.
+  const ignore = [event.id, ...event.objects.map((o) => o.id)];
+  const must = event.objects.filter((o) => objectRole(o) === "change");
+  if (!must.length) return false;
+  return claiming.some((b) =>
+    must.every((want) => {
+      const got = (b.objects ?? []).find((o) => o.id === want.id);
+      if (!got) return false;
+      const after = got.after.trim();
+      const before = got.before.trim();
+      if (!after) return false;
+      // Сцена обязана что-то изменить. Неизменное состояние — это не показанное событие,
+      // сколько бы слов из обещания в нём ни повторялось.
+      if (before && sameState(before, after)) return false;
+      // Слова, стоящие и в «до», и в «после» самой сцены, — её обстановка, а не переход:
+      // «standing outside the car» → «seated inside the car» меняет положение, а не машину.
+      // Раньше «car» из обещания «seated inside the car» считалось достигнутым уже в «до»
+      // сцены, и показанная посадка не засчитывалась.
+      const context = before ? [...stateTokens(before).words].filter((w) => stateTokens(after).words.has(w)) : [];
+      const skip = [...ignore, ...context];
+      // Результат уже достигнут ДО действия: «уже порванный купол колышется на ветру»
+      // показывает последствие, а не сам разрыв. Добавленные слова про ветер меняют строку,
+      // но не делают событие показанным.
+      if (before && stateReached(want.after, before, want.before, skip)) return false;
+      // Результат сцены — именно обещанный результат, со знаком: «review not submitted»
+      // не закрывает «review submitted».
+      if (!stateReached(want.after, after, want.before, skip)) return false;
+      return true;
+    }),
+  );
+}
+
+export function auditPlan(
+  beats: StoryBeat[],
+  bible: StoryBible,
+  character: Pick<CharacterProfile, "name" | "referenceFiles"> & Partial<Pick<CharacterProfile, "clothes">>,
+  shots?: FilmShot[],
+): PlanIssue[] {
+  const out: PlanIssue[] = [];
+  const shown = beats.filter(isAi);
+  const add = (code: string, ids: string[], message: string, severity: "block" | "warn" = "warn") => {
+    if (ids.length) out.push({ code, severity, beatIds: ids, message });
+  };
+
+  // Контракт событий проверяется первым: молча испорченный или пустой контракт превращал
+  // непокрытый план в «зелёный», и проверка ниже подтверждала успех на пустом месте.
+  const events = bible.events ?? [];
+  // Механизм без подтверждения и опровергнутое утверждение не обязаны быть показаны, поэтому
+  // отсутствие у них предметов — не порча контракта, а честный отказ выдумывать доказательство.
+  // Без этого планировщик наказывался запретом ровно за то, что не стал ставить сцену.
+  const factsForContract = bible.researchFacts ?? [];
+  const voiceOnly = (e: StoryEvent) =>
+    e.id && e.observable && (effectiveBasis(e, factsForContract) === "contradicted" || (isDocumentary(bible) && mechanismEvent(e) && effectiveBasis(e, factsForContract) !== "confirmed"));
+  const broken = events.filter((e) => !e.id || !e.observable || (!e.objects.length && !voiceOnly(e)));
+  if (broken.length) {
+    out.push({
+      code: "event-contract-broken",
+      severity: "block",
+      beatIds: [],
+      eventIds: broken.map((e) => e.id || "(без id)"),
+      message:
+        "Событие без проверяемого доказательства: нужны идентификатор, наблюдаемое изменение и хотя бы один предмет " +
+        `с состоянием до и после (${broken.map((e) => e.id || "(без id)").join(", ")})`,
+    });
+  }
+  // Запись, которую нормализатор не смог разобрать вовсе, раньше исчезала без следа:
+  // рядом с одним исправным событием контракт выглядел целым.
+  if (bible.eventsDropped) {
+    out.push({
+      code: "event-contract-broken",
+      severity: "block",
+      beatIds: [],
+      message: `Записей контракта не разобрано: ${bible.eventsDropped}. Нужны идентификатор, наблюдаемое изменение и предметы с состоянием до и после`,
+    });
+  }
+  // Пустой контракт — ошибка там, где сцены обещают совершение: заявленный переход предмета
+  // или ссылка на событие. План, который осознанно показывает обстановку и результат
+  // (панорама улицы, вид мастерской), обещания не даёт, и запрещать его нечем.
+  const claimsChange = shown.some((b) => (b.eventIds ?? []).length > 0 || (b.objects ?? []).some((o) => objectRole(o) === "change"));
+  if (!events.length && shown.length) {
+    if (claimsChange) {
+      out.push({
+        code: "event-contract-empty",
+        severity: "block",
+        beatIds: [],
+        message: "Сцены обещают показать изменение, но контракт событий пуст: проверить нечего",
+      });
+    } else {
+      out.push({
+        code: "no-events-declared",
+        severity: "warn",
+        beatIds: [],
+        message: "План не обещает ни одного события: сцены показывают обстановку и результат — убедитесь, что этого достаточно",
+      });
+    }
+  }
+  // Ссылка на несуществующее событие — тоже дефект контракта, а не мелочь: сцена считает
+  // себя показывающей то, чего в контракте нет.
+  const known = new Set(events.map((e) => e.id));
+  const dangling = shown.filter((b) => (b.eventIds ?? []).some((id) => !known.has(id)));
+  add(
+    "event-unknown-reference",
+    dangling.map((b) => b.id),
+    `Сцена ссылается на событие, которого нет в контракте (${[...new Set(dangling.flatMap((b) => (b.eventIds ?? []).filter((id) => !known.has(id))))].join(", ")})`,
+    "block",
+  );
+
+  // Обязательные события. Проверяется ПОСЛЕ нормализации, группировки и сокращения бюджета:
+  // именно там события пропадали незаметно.
+  const carried = new Set(bible.authorCarried ?? []);
+  const facts = bible.researchFacts ?? [];
+  // Статус факта, дошедший от справки до контракта. Заявленное «подтверждено» без цитаты из
+  // справки не считается: событие остаётся рассказом автора.
+  const unverified = events.filter((e) => e.id && e.basis && e.basis !== "told" && effectiveBasis(e, facts) === "told");
+  if (unverified.length) {
+    out.push({
+      code: "basis-unverified",
+      severity: "warn",
+      beatIds: [],
+      eventIds: unverified.map((e) => e.id),
+      message: `Статус без цитаты из справки не подтверждён, событие считается рассказом автора: ${unverified.map((e) => `${e.id} (${e.basis})`).join(", ")}`,
+    });
+  }
+  const documentary = isDocumentary(bible);
+  const mechanisms = documentary ? events.filter((e) => e.required && e.id && mechanismEvent(e) && effectiveBasis(e, facts) !== "confirmed") : [];
+  if (mechanisms.length) {
+    out.push({
+      code: "unconfirmed-mechanism",
+      severity: "warn",
+      beatIds: [],
+      eventIds: mechanisms.map((e) => e.id),
+      message:
+        `Механизм не подтверждён справкой и к показу не обязателен: ${mechanisms.map((e) => `${e.id} (${e.observable})`).join("; ")} — ` +
+        `кто и как распознал, решил или сказал, говорит голос; в кадре допустим только внешне наблюдаемый исход`,
+    });
+  }
+  const contradicted = events.filter((e) => e.id && effectiveBasis(e, facts) === "contradicted");
+  if (contradicted.length) {
+    out.push({
+      code: "voice-contradicts-facts",
+      severity: "warn",
+      beatIds: [],
+      eventIds: contradicted.map((e) => e.id),
+      message: `Речь противоречит справке, конфликт не исправляется автоматически и участники не добавляются: ${contradicted.map((e) => `${e.id} — справка: «${e.basisFact}»`).join("; ")}`,
+    });
+  }
+  // Сцена, изображающая неподтверждённый механизм или опровергнутое утверждение: запрет.
+  const suspect = new Set([...mechanisms, ...contradicted].map((e) => e.id));
+  const stagedText = (b: StoryBeat) => `${b.visualAction} ${b.keyMoment} ${b.motion} ${b.scene?.mechanics ?? ""}`;
+  add(
+    "invented-mechanism",
+    shown
+      .filter((b) => (b.eventIds ?? []).some((id) => suspect.has(id)) || (mechanisms.length > 0 && DEVICE_AGENCY.test(stagedText(b))))
+      .filter((b) => (b.eventIds ?? []).some(id => mechanisms.some(e => e.id === id && e.reviewedMechanism)) || DEVICE_AGENCY.test(stagedText(b)) || DEVICE_REACTION.test(stagedText(b)))
+      .map((b) => b.id),
+    "Сцена изображает механизм, которого справка не подтверждает: поворот камеры, тревога, объявление системы — это выдуманное доказательство; покажите внешний исход или оставьте голосу",
+    "block",
+  );
+  add(
+    "staged-contradicted-claim",
+    shown.filter((b) => (b.eventIds ?? []).some((id) => contradicted.some((e) => e.id === id))).map((b) => b.id),
+    "Сцена ставит утверждение, которое справка опровергает — такой кадр не снимается, конфликт решает автор",
+    "block",
+  );
+  // Обязательное событие, у которого нет перехода, только сохраняемые условия: сцена может
+  // честно показать всё обещанное, и это всё равно не событие. Раньше это выходило как
+  // «не показано», и второй заход искал сцену, хотя чинить надо контракт.
+  const noChange = events.filter((e) => e.required && e.id && e.objects.length && !e.objects.some((o) => objectRole(o) === "change"));
+  if (noChange.length) {
+    out.push({
+      code: "event-without-change",
+      severity: "block",
+      beatIds: [],
+      eventIds: noChange.map((e) => e.id),
+      message: `У обязательного события нет перехода, только сохраняемые условия — это обстановка, а не событие: ${noChange.map((e) => `${e.id} (${e.observable})`).join("; ")}. Опишите, что меняется, или снимите обязательность`,
+    });
+  }
+  const missing = events.filter((e) => mustShowEvent(e, facts, documentary) && !carried.has(e.id) && !eventCovered(e, beats, shots));
+  if (missing.length) {
+    out.push({
+      code: "event-not-covered",
+      severity: "block",
+      beatIds: [],
+      eventIds: missing.map((e) => e.id),
+      message: `Обязательные события не показаны: ${missing.map((e) => `${e.id} (${e.observable})`).join("; ")}`,
+    });
+  }
+
+  // Обязательное для понимания не всегда обязательно к показу: если планировщик сам отдал эти
+  // реплики объяснению, событие несёт голос автора. Так было с отказом в кладбищенской льготе:
+  // требование «покажи каждое» во втором заходе вернуло выдуманный штамп на бумагах ООО.
+  // Решение остаётся видимым в замечаниях, но второго захода за картинкой нет.
+  const voiced = events.filter((e) => carried.has(e.id));
+  if (voiced.length) {
+    out.push({
+      code: "event-carried-by-author",
+      severity: "warn",
+      beatIds: [],
+      eventIds: voiced.map((e) => e.id),
+      message: `Обязательные события несёт голос автора, картинки к ним нет: ${voiced.map((e) => `${e.id} (${e.observable})`).join("; ")}`,
+    });
+  }
+
+  // Крупность против композиции: на крупном плане в кадр не влезет то, ради чего
+  // оставляли место сверху или снизу.
+  add(
+    "shot-vs-composition",
+    shown.filter((b) => b.composition && b.shotType === "close" && b.composition !== "center").map((b) => b.id),
+    "Крупный план вместе с местом в кадре под предмет: на крупности close туда ничего не поместится",
+  );
+  add(
+    "wide-vs-composition",
+    shown.filter((b) => b.composition === "subject_small_in_wide" && (b.shotType === "close" || b.shotType === "medium")).map((b) => b.id),
+    "«Человек мелко в общем плане» стоит вместе с близкой крупностью",
+  );
+
+  // Камера одновременно неподвижна и движется. Смотрим только клаузу про камеру:
+  // после точки с запятой описывается движение ЧЕЛОВЕКА, и «his hands move toward
+  // the camera» — это не движение камеры.
+  add(
+    "camera-static-and-moving",
+    shown
+      .filter((b) => {
+        const c = b.camera.split(";")[0];
+        return /\bstatic\b|\bfixed\b|\blocked[- ]off\b/i.test(c) && CAMERA_MOVES.test(c);
+      })
+      .map((b) => b.id),
+    "Камера описана и как неподвижная, и как движущаяся",
+    "block",
+  );
+
+  // Камера сверху и предмет НАД человеком: предмет окажется между ним и камерой и закроет
+  // кадр. Ровно этот класс уже испортил одну оплаченную сцену, только выраженный иначе.
+  add(
+    "camera-above-object-above",
+    shown
+      .filter((b) => b.cameraAngle === "overhead" || b.cameraAngle === "high_angle")
+      .filter((b) => OBJECT_ABOVE.test(`${b.visualAction} ${b.keyMoment}`))
+      .map((b) => b.id),
+    "Камера сверху, а важное находится НАД человеком — оно закроет собой кадр",
+    "block",
+  );
+
+  // Слишком много действий в одной сцене: Veo выполняет первое и путает остальные.
+  add(
+    "too-many-actions",
+    shown.filter((b) => (b.visualAction.match(ACTION_VERB) ?? []).length > 3).map((b) => b.id),
+    "В одной сцене больше трёх действий подряд — генератор выполнит первое и смажет остальные",
+  );
+
+  // Участник может быть назван в расстановке, а действие описано через его руки.
+  const characterInScene = new RegExp(`(?<![\\p{L}\\p{N}])${character.name.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}(?![\\p{L}\\p{N}])`, "iu");
+  add(
+    "hero-flag-mismatch",
+    shown.filter((b) => b.visualAction.length > 0 && b.gudiniVisible !== characterInScene.test(`${b.scene?.who ?? ""} ${b.visualAction} ${b.motion ?? ""}`)).map((b) => b.id),
+    `Флаг присутствия ${character.name} в кадре расходится с текстом действия`,
+  );
+
+  // Просьба показать читаемый текст. Учитывается ВСЯ постановка сцены: если сам предмет
+  // объявлен нечитаемым в реквизите («a row of blurred handwritten words»), требования
+  // разобрать надпись нет. Персонаж, читающий карточку, тоже не обязывает зрителя её читать.
+  // Снятие работает адресно: нечитаемость одного предмета не отменяет требования прочитать
+  // другой — у отмены и требования должно быть общее значимое слово.
+  const readable = (re: RegExp) =>
+    shown
+      .filter((b) => {
+        // Требование читаемости ищется во ВСЁМ, что уходит в запрос как задание: оно попадало
+        // и в механику сцены («the folder makes the LLC status readable at a glance»), и в
+        // движение, а проверка смотрела только действие и ключевой момент и такую сцену пропускала.
+        const demand = `${b.visualAction} ${b.keyMoment} ${b.motion ?? ""} ${b.scene?.mechanics ?? ""}`;
+        const found = demand.match(re);
+        if (!found) return false;
+        // «no readable text», «without legible labels» — это ОТКАЗ от читаемости, а не
+        // требование её показать. Отрицание перед совпадением снимает требование.
+        const before = demand.slice(Math.max(0, (found.index ?? 0) - 24), found.index ?? 0);
+        if (/\b(?:no|not|without|never|nothing)\b[^.]{0,14}$/i.test(before)) return false;
+        const staging = [...(b.scene?.props ?? []), ...(b.scene?.worn ?? []), b.scene?.mechanics ?? "", b.stateBefore, b.stateAfter, demand];
+        const hit = demand.match(re)?.[0] ?? "";
+        const around = demand.slice(Math.max(0, demand.indexOf(hit) - 60), demand.indexOf(hit) + hit.length + 60);
+        const near = stateTokens(around).words;
+        return !staging.some((part) => {
+          if (!UNREADABLE.test(part)) return false;
+          const words = stateTokens(part).words;
+          return [...words].some((w) => near.has(w));
+        });
+      })
+      .map((b) => b.id);
+  const hard = [...new Set([...readable(READABLE_HARD), ...readable(READABLE_WORD)])];
+  add("readable-text", hard, "Сцена требует читаемый текст на экране или бумаге — Veo его не выводит", "block");
+  add(
+    "screen-content",
+    readable(READABLE_SOFT).filter((id) => !hard.includes(id)),
+    "В кадре экран с содержимым: надписи на нём выйдут нечитаемыми, событие должно читаться по действию",
+  );
+
+  // Состояние отыгрывается назад — но у КОНКРЕТНОГО предмета. Сравнение по словам без
+  // идентификатора ошибалось в обе стороны: переход от порванного основного купола к
+  // упакованному запасному считался восстановлением, а настоящее восстановление основного
+  // терялось, если рядом упоминался другой повреждённый предмет.
+  const regress: string[] = [];
+  const lastSeen = new Map<string, string>();
+  for (const b of shown) {
+    for (const o of b.objects ?? []) {
+      const prev = lastSeen.get(o.id);
+      if (prev && DAMAGED.test(prev) && INTACT.test(o.before) && !DAMAGED.test(o.before)) regress.push(`${b.id}/${o.id}`);
+      if (o.after) lastSeen.set(o.id, o.after);
+    }
+  }
+  add("state-regression", regress, "Повреждённый предмет снова целый в следующей сцене", "block");
+
+  // Место действия возвращается через сцену — флешбэк, а в ролике он читается как ошибка.
+  const flash: string[] = [];
+  for (let i = 2; i < shown.length; i++) {
+    const a = shown[i - 2].location.trim().toLowerCase();
+    const b = shown[i - 1].location.trim().toLowerCase();
+    const c = shown[i].location.trim().toLowerCase();
+    if (a && b && c && a === c && a !== b) flash.push(shown[i].id);
+  }
+  // Повторное использование локации не доказывает возврат во времени: заказ на кухне,
+  // получение на крыльце, распаковка снова на кухне — нормальная хронология. Сигнал остаётся,
+  // но обязательным запретом он быть не может.
+  add("location-jump-back", flash, "Действие возвращается в прежнее место через сцену — проверьте порядок событий");
+
+  // Время суток между соседними сценами. В плане про такси машина останавливалась на дневной
+  // парковке, а через ноль секунд полиция подходила к ней ночью, хотя по речи прошло несколько
+  // минут. Два независимых клипа сняли бы один и тот же момент при разном свете. Смена
+  // времени суток допустима, только если она названа в сцене как прошедшее время.
+  const DAY = /\b(?:daytime|daylight|midday|noon|afternoon|morning|sunny|broad daylight)\b/i;
+  const NIGHT = /\b(?:night|nighttime|midnight|after dark|dusk|evening|late at night)\b/i;
+  const TIME_PASSES = /\b(?:hours? later|later that|the next (?:day|morning)|by (?:night|evening|morning)|as night falls|after dark falls|time-lapse|days? later)\b/i;
+  const tod = (b: StoryBeat): "day" | "night" | null => {
+    const t = `${b.location} ${b.visualAction} ${b.stateBefore}`;
+    const d = DAY.test(t);
+    const n = NIGHT.test(t);
+    if (d && !n) return "day";
+    if (n && !d) return "night";
+    return null;
+  };
+  const jumps: string[] = [];
+  for (let i = 1; i < shown.length; i++) {
+    const a = tod(shown[i - 1]);
+    const b = tod(shown[i]);
+    if (a && b && a !== b && !TIME_PASSES.test(`${shown[i].visualAction} ${shown[i].motion} ${shown[i].stateBefore}`)) jumps.push(shown[i].id);
+  }
+  add(
+    "time-of-day-jump",
+    jumps,
+    "Время суток меняется между соседними сценами без названного прошедшего времени — два клипа снимут один момент при разном свете; выровняйте время суток или назовите разрыв во времени в сцене",
+  );
+
+  // Проверки по конечным запросам. До них разбор смотрел только на биты, и потерянная
+  // сцена — бит есть в таймлайне, но ни в одном клипе его нет — выглядела как исправный план.
+  if (shots) {
+    const covered = new Set(shots.flatMap((sh) => sh.beatIds));
+    add(
+      "beat-not-in-shot",
+      shown.filter((b) => !covered.has(b.id)).map((b) => b.id),
+      "Сцена осталась в таймлайне, но ни в один запрос Veo не попала — на экране её не будет",
+      "block",
+    );
+    // Якорь вне используемого отрезка клипа: срок отброшен, событие осталось без времени.
+    // Это не повод требовать невозможного в промпте, но и молчать нельзя — сцену надо переставить.
+    const outside = [...new Set(shots.flatMap((sh) => (sh.deadlines ?? []).filter((d) => d.beyond).map((d) => d.beatId)))];
+    // Обязательное событие без выполнимого срока — это не замечание: оно должно прозвучать
+    // в свою реплику, а показать его в этом клипе уже нельзя. Такую сцену надо переставить,
+    // поэтому план не идёт к оплате. Для остальных достаточно предупреждения.
+    const requiredIds = new Set(events.filter((e) => e.required).map((e) => e.id));
+    const hard = outside.filter((id) => (beats.find((b) => b.id === id)?.eventIds ?? []).some((e) => requiredIds.has(e)));
+    add(
+      "anchor-outside-shot",
+      outside.filter((id) => !hard.includes(id)),
+      "Момент в речи приходится на отрезок, которого нет в клипе — событие останется без срока, сцену нужно переставить",
+    );
+    add(
+      "required-anchor-outside-shot",
+      hard,
+      "Обязательное событие звучит позже, чем заканчивается его клип — сцену нужно переставить под свою реплику",
+      "block",
+    );
+    // Удержание не помещается в используемый отрезок: результат появляется так поздно,
+    // что рассмотреть его зритель не успевает. Кадр при этом выполним, поэтому оплату
+    // это не запрещает — сцену нужно передвинуть или отдать хвост реплики автору.
+    const tight = [...new Set(shots.flatMap((sh) => (sh.deadlines ?? []).filter((d) => d.tight).map((d) => d.beatId)))];
+    add(
+      "hold-outside-window",
+      tight,
+      "Результат появляется слишком поздно, чтобы его успели рассмотреть внутри используемого отрезка — перенесите момент раньше или оставьте хвост реплики автору",
+    );
+    // Один бит с двумя событиями получает один срок на оба: разделить их нечем, пока
+    // якорь один на бит. Такую сцену планировщик должен разложить на две.
+    add(
+      "beat-multiple-events",
+      shown.filter((b) => (b.eventIds ?? []).length > 1).map((b) => b.id),
+      "В одной сцене несколько событий: у них будет общий срок, показать их по отдельности нельзя — разложите на две сцены",
+    );
+  }
+
+  // Состояние предмета описывает предмет. «harness — standing at the rocky edge, both feet
+  // planted on stone» описывает человека, и надетое снаряжение при этом теряется: в запрос
+  // уходит поза вместо предмета. Где стоит человек — это scene.who.
+  add(
+    "object-state-describes-person",
+    shown
+      .filter((b) => (b.objects ?? []).some((o) => PERSON_POSE.test(`${o.before} ${o.after}`)))
+      .map((b) => b.id),
+    "Состояние предмета описывает позу человека, а не сам предмет — положение людей относится к сцене, а не к вещи",
+  );
+
+  // Фазы смешаны: сцена одновременно объявляет предмет и в исходном, и в конечном состоянии.
+  // Так в одном запросе оказывались «упакован, ещё не раскрыт» и «разорванная ткань заполняет
+  // верх кадра»: генератор выбирает одно из двух наугад.
+  const mixed: string[] = [];
+  for (const b of shown) {
+    for (const o of b.objects ?? []) {
+      if (!o.before.trim() || !o.after.trim() || sameState(o.before, o.after)) continue;
+      // Смотрим только на то, чем кадр НАЧИНАЕТСЯ: сводку состояния и позицию камеры.
+      // Предложения о ходе действия из проверки исключаются — наблюдение за вскрытием
+      // не означает, что конверт вскрыт с первого кадра.
+      const declared = (b.stateBefore ?? "").split(/[;,]/);
+      // Из описания камеры берутся только прямые заявления о первом кадре.
+      const claimed = (b.camera ?? "").split(/[;,]/).filter((c) => INITIAL_CLAIM.test(c));
+      const initialClauses = [...declared, ...claimed]
+        .map((c) => c.trim())
+        .filter((c) => c && !PROCESS.test(c));
+      const initial = initialClauses.join("; ");
+      if (!initial) continue;
+      // Слова места и реквизита в счёт не идут: «beside the workbench» в описании камеры
+      // говорит, где стоит камера, а не что предмет уже поднят над верстаком.
+      // Participants can be the distinguishing destination of a handover. Removing their
+      // names would reduce "held by the courier" to "held" and match the sender's grip.
+      const scenery = [o.id, b.location, ...(b.scene?.props ?? []), ...(b.scene?.worn ?? [])];
+      // Противоречием считается только ПОЛНОЕ заявление конечного состояния. Одно общее
+      // слово ловило исправные сцены: «phone closed, cover screen lit» в начале кадра
+      // совпадало с «visible lit cover display» лишь словом «lit», и раскрытие складного
+      // телефона запрещалось к оплате.
+      const decisive = decisiveWords(o.before, o.after, scenery);
+      // Do not combine separate subjects: "woman holds envelope; courier's hand empty"
+      // does not say that the courier already holds the envelope.
+      const claimsAfter = decisive.size > 0 && initialClauses.some((clause) => {
+        const said = stateTokens(clause).words;
+        return [...decisive].every((w) => said.has(w));
+      });
+      if (claimsAfter && !stateReached(o.before, initial, o.after, scenery)) {
+        mixed.push(`${b.id}/${o.id}`);
+      }
+    }
+  }
+  add("phase-conflict", mixed, "Сцена начинается с предмета в исходном состоянии, а камера уже описывает его конечное состояние", "block");
+
+  // Камера сопровождает движущийся объект, но по чему видно движение — не сказано.
+  // Постоянная дистанция без ориентира читается как зависание.
+  add(
+    "follow-without-reference",
+    shown.filter((b) => CAMERA_FOLLOWS.test(b.camera) && !MOTION_REFERENCE.test(`${b.camera} ${b.motion} ${b.visualAction}`)).map((b) => b.id),
+    "Камера идёт за объектом, но в кадре нет ориентира движения — скорость и перемещение не прочитаются",
+  );
+
+  // Объект идёт в объектив и одновременно должен оставаться целиком в кадре тем же размером.
+  // Либо камера отступает, либо движение проходит мимо неё.
+  add(
+    "toward-lens-fixed-scale",
+    shown
+      .filter((b) => /\btoward (?:the )?camera\b|\binto the lens\b/i.test(`${b.camera} ${b.motion}`))
+      .filter((b) => !CAMERA_MOVES.test(b.camera))
+      .filter((b) => b.composition !== "center")
+      .map((b) => b.id),
+    "Объект движется в объектив, а камера неподвижна и обязана удержать масштаб — задайте отход камеры или движение мимо неё",
+  );
+
+  // Реквизит заявляет конечное состояние: «the folding phone, now fully open and flat» в
+  // строке присутствия спорит с началом кадра, где телефон ещё раскрывается.
+  const phaseProps: string[] = [];
+  for (const b of shown) {
+    const items = [...(b.scene?.props ?? []), ...(b.scene?.worn ?? [])];
+    for (const item of items) {
+      const said = stateTokens(item).words;
+      for (const o of b.objects ?? []) {
+        if (objectRole(o) !== "change") continue;
+        const decisive = decisiveWords(o.before, o.after, [o.id]);
+        if (decisive.size && [...decisive].every((w) => said.has(w))) phaseProps.push(`${b.id}/${o.id}`);
+      }
+    }
+  }
+  add(
+    "prop-asserts-end-state",
+    [...new Set(phaseProps)],
+    "Реквизит сцены назван уже в конечном состоянии — строка присутствия спорит с началом кадра",
+  );
+
+  // Состояние меняется, а причины в кадре нет. Если предмет не назван ни в действии, ни в
+  // движении, ни в механике, то изменение просто «появляется»: сено было нескошенным и стало
+  // скошенным, экран сам сменился на галочку. Зритель не увидит, отчего это произошло.
+  const uncaused: string[] = [];
+  for (const b of shown) {
+    const doing = `${b.visualAction} ${b.motion} ${b.scene?.mechanics ?? ""}`.toLowerCase();
+    for (const o of b.objects ?? []) {
+      if (objectRole(o) !== "change") continue;
+      const name = o.id.replace(/[-_]+/g, " ").toLowerCase().split(" ").filter((w) => w.length >= 3);
+      const named = name.length > 0 && name.some((w) => doing.includes(w));
+      // предмет может быть назван и своими словами состояния: «the hay is cut»
+      const byState = [...decisiveWords(o.before, o.after, [o.id])].some((w) => doing.includes(w));
+      if (!named && !byState) uncaused.push(`${b.id}/${o.id}`);
+    }
+  }
+  add(
+    "change-without-cause",
+    uncaused,
+    "Состояние предмета меняется, но в действии, движении и механике этого предмета нет: изменение появится само собой",
+  );
+
+  // Предмет «до» объявлен отсутствующим, а расстановка сцены уже ставит его в кадр: «no marker»
+  // рядом с «stands beside the grave marker», «goats — not present» рядом с «goats stand behind
+  // the fence». Это показ того, что уже есть, а не появление; с таким «до» запрос просит Veo
+  // вырастить предмет из пустоты.
+  const ABSENT = /\b(?:not present|absent|missing|none)\b/i;
+  const presentAtStart: string[] = [];
+  for (const b of shown) {
+    const who = (b.scene?.who ?? "").toLowerCase();
+    if (!who) continue;
+    for (const o of b.objects ?? []) {
+      const before = o.before.toLowerCase();
+      const nouns = new Set<string>();
+      if (ABSENT.test(before)) for (const w of o.id.toLowerCase().split(/[-_\s]+/)) if (w.length >= 4) nouns.add(w);
+      for (const m of before.matchAll(/\b(?:no|without)\s+(?:[a-z]+\s+)?([a-z]{4,})/g)) nouns.add(m[1]);
+      const stem = (w: string) => w.replace(/(?:es|s)$/, "");
+      if ([...nouns].some((n) => new RegExp("(?:^|[^a-z])" + stem(n)).test(who))) presentAtStart.push(`${b.id}/${o.id}`);
+    }
+  }
+  add(
+    "absent-before-but-present",
+    presentAtStart,
+    "Предмет в начале сцены объявлен отсутствующим, но расстановка уже ставит его в кадр — это показ, а не появление",
+  );
+
+  // Постоянный персонаж переодет сценой: блок персонажа требует его костюм в каждом кадре,
+  // а сцена надевает на него костюм роли — «Gudini as Donald Trump in a dark suit». Два
+  // несовместимых требования к одной одежде в одном запросе.
+  const clothes = new Set((character.clothes ?? "").toLowerCase().split(/[^a-z-]+/).filter(Boolean));
+  const CLOTHING = /\b(?:suit|shirt|t-shirt|blouse|dress|uniform|coat|overcoat|blazer|tuxedo|tie|sweater|hoodie|jeans|trousers|pants|jacket|robe|apron|vest|overalls|gown)\b/gi;
+  const recostumed: string[] = [];
+  if (clothes.size) {
+    const name = character.name.toLowerCase();
+    for (const b of shown.filter((x) => x.gudiniVisible)) {
+      const wearing = [...(b.scene?.worn ?? [])];
+      const action = b.visualAction.toLowerCase();
+      const at = action.indexOf(name);
+      if (at >= 0) {
+        const m = /\b(?:in|wearing)\s+(?:a |an |his )?[^.;]{0,30}/.exec(action.slice(at, at + 90));
+        if (m) wearing.push(m[0]);
+      }
+      const foreign = wearing.flatMap((w) => [...w.matchAll(CLOTHING)].map((x) => x[0].toLowerCase())).filter((w) => !clothes.has(w));
+      if (foreign.length) recostumed.push(b.id);
+    }
+  }
+  // Ошибка назначения роли, а не повод переодеть персонажа: участник в другой одежде — отдельный
+  // человек. Прежняя формулировка «роль играется в своём костюме» толкала второй заход одевать
+  // пятнадцатилетнего подростка в куртку персонажа.
+  add(
+    "costume-conflict",
+    recostumed,
+    `Роль назначена неверно: участник в чужой одежде — отдельный персонаж (supportingCharacters), а не ${character.name} в его костюме; ${character.name} в такой сцене либо отсутствует, либо стоит рядом в своём костюме`,
+    "block",
+  );
+  // Роль другого возраста или пола. В документальной истории это реальные люди — отдельные
+  // участники, запрет. В вымышленной истории и условном примере перевоплощение остаётся
+  // художественным решением: замечание, не запрет.
+  if (ROLE_OTHER_PERSON.test(bible.playedByGudini ?? "")) {
+    add(
+      "role-miscast",
+      shown.filter((b) => b.gudiniVisible).map((b) => b.id),
+      isDocumentary(bible)
+        ? `Роль «${bible.playedByGudini}» — реальный человек другого возраста или пола: её играет отдельный участник, а не ${character.name}`
+        : `Роль «${bible.playedByGudini}» другого возраста или пола: ${character.name} играет её собой, без смены внешности — проверьте, что сцена это допускает`,
+      isDocumentary(bible) ? "block" : "warn",
+    );
+  }
+
+  // Визуальные задачи всей истории. Судятся, когда планировщик их составил: сцена без задачи —
+  // заполнитель, две сцены с одной задачей — одно и то же понимание с другого ракурса, сцена
+  // поверх объяснения — выдуманная картинка к тому, что честно не снять. Появилось после ролика,
+  // где под реплики о налоге встали пустая карточка, штамп отказа и безликий лист.
+  const tasks = bible.visualTasks ?? [];
+  if (tasks.length) {
+    const byId = new Map(tasks.map((t) => [t.id, t]));
+    add(
+      "scene-without-visual-task",
+      shown.filter((b) => !b.visualTask || !byId.has(b.visualTask)).map((b) => b.id),
+      "Сцена не решает ни одной визуальной задачи истории — это заполнитель: привяжите её к задаче или отдайте отрезок автору",
+    );
+    // Под объяснение можно поставить иллюстрацию, которая помогает пониманию: голос называет сумму
+    // налога поверх кадра с полем. Нельзя ставить выдуманное доказательство — документ, штамп,
+    // чиновника, экран с цифрами: такой кадр утверждает то, чего речь не показывала.
+    add(
+      "explanation-faked-proof",
+      shown
+        .filter((b) => byId.get(b.visualTask ?? "")?.role === "explanation")
+        .filter((b) => PROOF_PROPS.test(`${b.visualAction} ${b.keyMoment} ${b.motion} ${(b.scene?.props ?? []).join(" ")} ${b.scene?.mechanics ?? ""}`))
+        .map((b) => b.id),
+      "Под объяснение поставлено выдуманное доказательство: документ, штамп, чиновник или цифры — иллюстрация помогает пониманию, но не изображает то, чего речь не показывала",
+    );
+    // Объяснение не оправдывает пропуск показываемого события: разрыв купола, вскрытие посылки или
+    // передача ключа остаются обязательными к показу, даже если их реплики отданы объяснению.
+    // Голосу отдаётся только исход, который честно не снять: право, статус, сумма, причина.
+    const explainedPhrases = new Set<number>();
+    for (const t of tasks) {
+      if (t.role !== "explanation") continue;
+      for (let i = t.fromPhrase; i <= Math.min(t.toPhrase, t.fromPhrase + 500); i++) explainedPhrases.add(i);
+    }
+    const hidden = events.filter((e) => {
+      // то, что к показу не обязательно (исход только голосом, неподтверждённый механизм,
+      // опровергнутое утверждение), объяснением не «прячется» — там ему и место
+      if (!e.required || !e.id || voiceOnlyEvent(e) || !mustShowEvent(e, bible.researchFacts ?? [], isDocumentary(bible))) return false;
+      for (let i = e.fromPhrase; i <= Math.min(e.toPhrase, e.fromPhrase + 500); i++) if (!explainedPhrases.has(i)) return false;
+      return true;
+    });
+    if (hidden.length) {
+      out.push({
+        code: "explanation-hides-event",
+        severity: "warn",
+        beatIds: [],
+        eventIds: hidden.map((e) => e.id),
+        message: `Показываемое событие отдано объяснению: ${hidden.map((e) => `${e.id} (${e.observable})`).join("; ")} — это действие с предметом, его нужно показать, а не рассказать`,
+      });
+    }
+    const firstFor = new Map<string, StoryBeat>();
+    const repeats: string[] = [];
+    for (const b of shown) {
+      if (!b.visualTask) continue;
+      const prev = firstFor.get(b.visualTask);
+      if (!prev) {
+        firstFor.set(b.visualTask, b);
+        continue;
+      }
+      // одна непрерывная сцена, разложенная на клипы цепочки, повтором не считается
+      if (prev.continuityGroup && prev.continuityGroup === b.continuityGroup) continue;
+      // Две сцены одной задачи допустимы, когда вторая добавляет новое: общий план и деталь вместе
+      // раскрывают один смысл. Повтор — когда решающий момент тот же, а меняется только ракурс.
+      if (sameLearning(`${prev.keyMoment} ${prev.frameSubject}`, `${b.keyMoment} ${b.frameSubject}`)) repeats.push(b.id);
+    }
+    add(
+      "repeated-visual-task",
+      repeats,
+      "Сцена повторяет решающий момент предыдущей сцены той же задачи — другой ракурс не даёт зрителю нового понимания, оставьте одну или покажите новое",
+    );
+    const pictured = tasks.filter((t) => t.role !== "explanation");
+    const twins: string[] = [];
+    for (let i = 0; i < pictured.length; i++) {
+      for (let j = i + 1; j < pictured.length; j++) {
+        if (sameLearning(pictured[i].learns, pictured[j].learns)) twins.push(`${pictured[i].id}/${pictured[j].id}`);
+      }
+    }
+    add("duplicate-visual-tasks", twins, "Две визуальные задачи дают зрителю одно и то же понимание — объедините их в одну");
+  }
+
+  // Сцена, которая сама объявляет себя происходящей раньше предыдущих. В ролике на сорок
+  // секунд флешбэк читается как ошибка монтажа, а не как приём: после порванного купола
+  // зритель видит, как герой только надевает запасной ранец «перед прыжком».
+  add(
+    "scene-out-of-order",
+    shown.filter((b, i) => i > 0 && EARLIER.test(`${b.visualAction} ${b.keyMoment} ${b.motion}`)).map((b) => b.id),
+    "Сцена объявлена происходящей раньше предыдущих — в коротком ролике это читается как ошибка порядка",
+  );
+
+  // Сцена с героем без эталонов: лицо будет случайным.
+  if (!character.referenceFiles.length) {
+    add("no-references", shown.filter((b) => b.gudiniVisible).map((b) => b.id), "Сцены с героем без эталонных картинок — лицо не удержится");
+  }
+
+  return out;
+}
+
+
+/**
+ * Исход, который честно не снять: право, статус, сумма, причина, решение ведомства. Только такое
+ * событие можно отдать голосу автора. Всё, что меняет предмет — купол, посылку, экран, ключ в
+ * руке, — остаётся обязательным к показу, как бы речь его ни называла.
+ */
+const VOICE_ONLY_OUTCOME =
+  /\b(?:tax(?:es|ed|ation)?|exempt(?:ion|ed)?|status|register(?:ed|ation)?|legal(?:ly)?|illegal(?:ly)?|law(?:ful)?|ownership|classif(?:ied|ication)|denied|denial|approv(?:ed|al)|granted|reject(?:ed|ion)|price|cost|sum|amount|dollars?|percent|rate|fee|fine|penalt(?:y|ies)|ruling|verdict|licen[cs]e|permit(?:ted)?|entitled|qualif(?:y|ies|ied)|because|reason|savings?|worth|valued?|debt|loan|interest|budget|revenue|profit|loss|deduction|liabilit(?:y|ies))\b/i;
+const PHYSICAL_CHANGE =
+  /\b(?:tears?|torn|rips?|opens?|opened|unpacks?|unwraps?|pulls?|drops?|falls?|jumps?|lands|landed|landing|throws?|breaks?|broken|snaps?|deploys?|inflates?|collapses?|catches?|hits?|slams?|spills?|pours?|cuts?|lifts?|pushes?|closes?|closed|clicks?|presses?|taps?|types?|hands?|handed|pass(?:es|ed)?|changes? hands|slides?|swings?|kicks?|rolls?|crashes?|bursts?|shreds?|flips?|grabs?|releases?|launches?|climbs?|runs?|walks?|screen|display|lights? up|turns? on|turns? off|signs?|signed|stamps?|stamped)\b/i;
+
+/** Проверка на документ, штамп, чиновника и цифры в кадре под объяснением. */
+const PROOF_PROPS =
+  /\b(?:documents?|paperwork|papers|forms?|stamps?|stamped|seals?|certificates?|contracts?|invoices?|receipts?|tax bill|ledger|signature|signs the|official|clerk|inspector|notary|court|verdict|figures? (?:on|printed)|numbers? (?:on|printed)|amount (?:on|printed))\b/i;
+
+/**
+ * Можно ли отдать событие голосу автора: все его носители абстрактны (статус, право, сумма) и
+ * ни в наблюдаемом изменении, ни в состояниях нет физического действия с предметом.
+ */
+export function voiceOnlyEvent(e: Pick<StoryEvent, "observable" | "objects">): boolean {
+  const all = `${e.observable} ${e.objects.map((o) => `${o.id.replace(/[-_]+/g, " ")} ${o.before} ${o.after}`).join(" ")}`;
+  if (PHYSICAL_CHANGE.test(all)) return false;
+  if (!e.objects.length) return VOICE_ONLY_OUTCOME.test(e.observable);
+  return e.objects.every((o) => VOICE_ONLY_OUTCOME.test(`${o.id.replace(/[-_]+/g, " ")} ${o.before} ${o.after}`));
+}
+
+/** Одно ли понимание описывают две задачи: почти все значимые слова совпадают по основе. */
+export function sameLearning(a: string, b: string): boolean {
+  const stems = (t: string) =>
+    new Set(t.toLowerCase().replace(/ё/g, "е").split(/[^\p{L}\p{N}]+/u).filter((w) => w.length >= 4).map((w) => w.slice(0, 5)));
+  const x = stems(a);
+  const y = stems(b);
+  if (x.size < 2 || y.size < 2) return false;
+  let common = 0;
+  for (const w of x) if (y.has(w)) common++;
+  return common / Math.min(x.size, y.size) >= 0.7;
+}

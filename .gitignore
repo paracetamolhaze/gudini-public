@@ -1,0 +1,16 @@
+node_modules/
+.next/
+data/
+.env
+.env.local
+*.tsbuildinfo
+next-env.d.ts
+caddy.exe
+_*.ts
+_packdir/
+_research.json
+carousel/.work/
+carousel/deploy/site/build/
+carousel/deploy/site/*.log
+
+deploy/astra-merge/build/

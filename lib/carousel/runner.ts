@@ -1,0 +1,127 @@
+import os from "os";
+import type { CarouselJob } from "./types";
+import { acquireRunnerLock, claimJob, findRunnableJob, finishJob, patchJob, releaseRunnerLock, touchRunnerLock } from "./store";
+import { executeJob } from "./jobs";
+import { settlePublish } from "./publishJob";
+import { settleOrphans } from "./spend";
+import { markOrphanInFlight } from "./images";
+
+/**
+ * Фоновый обработчик каруселей — отдельный процесс. Его запускает сайт, когда в очереди
+ * есть задания (lib/carousel/runnerControl.ts), и при старте сервера — чтобы продолжить
+ * прерванное перезапуском. Вкладка браузера для работы не нужна.
+ *
+ * Ограничения расхода: один обработчик на весь раздел (файловая блокировка), до трёх заданий
+ * одновременно (CAROUSEL_PARALLEL) — вторая карусель не ждёт, пока соберётся первая; пониженный
+ * приоритет процесса, общий браузер закрывается, когда работа кончилась, без заданий процесс
+ * завершается через 45 секунд.
+ */
+
+const PID = process.pid;
+const IDLE_EXIT_MS = 45_000;
+const MAX_ATTEMPTS = 3;
+const PARALLEL = Math.max(1, Math.min(6, Number(process.env.CAROUSEL_PARALLEL) || 3));
+
+const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
+const stamp = () => new Date().toISOString();
+
+function giveUp(id: string, job: CarouselJob) {
+  const message = "Задание прерывалось несколько раз (перезапуск или сбой обработчика) и остановлено. Запустите его снова.";
+  try {
+    if (job.type === "publish" || job.type === "verify_publish") settlePublish(id, "Публикация прерывалась несколько раз и остановлена.");
+    finishJob(id, job.id, "error", { error: message });
+  } catch {}
+}
+
+async function runOne(id: string, job: CarouselJob) {
+  const beat = setInterval(() => {
+    try {
+      patchJob(id, job.id, {});
+    } catch {}
+  }, 5000);
+  try {
+    await executeJob(id, job);
+  } catch (e: any) {
+    console.error(`${stamp()} задание ${id} упало: ${String(e?.message ?? e).slice(0, 300)}`);
+  } finally {
+    clearInterval(beat);
+  }
+  console.log(`${stamp()} ${job.type} ${id} завершено`);
+}
+
+async function main() {
+  try {
+    os.setPriority(0, 10);
+  } catch {}
+  if (!acquireRunnerLock(PID)) {
+    console.log(`${stamp()} обработчик каруселей уже работает — выхожу`);
+    return;
+  }
+  console.log(`${stamp()} обработчик каруселей запущен, pid ${PID}`);
+  // Прежний обработчик умер: его платные запросы могли уйти без записанного ответа
+  try {
+    const orphanSpend = settleOrphans("обработчик перезапущен до ответа провайдера — исход запроса неизвестен");
+    const orphanImages = markOrphanInFlight();
+    if (orphanSpend || orphanImages) console.log(`${stamp()} запросов с неизвестным исходом после перезапуска: ${orphanSpend}, слайдов: ${orphanImages}`);
+  } catch (e: any) {
+    console.error(`${stamp()} проверка прерванных запросов: ${String(e?.message ?? e).slice(0, 200)}`);
+  }
+  const lockBeat = setInterval(() => {
+    try {
+      if (!touchRunnerLock(PID)) {
+        console.error(`${stamp()} блокировку обработчика занял другой процесс — выхожу`);
+        process.exit(0);
+      }
+    } catch {}
+  }, 5000);
+
+  let stopping = false;
+  process.on("SIGTERM", () => (stopping = true));
+  process.on("SIGINT", () => (stopping = true));
+
+  const active = new Map<string, Promise<void>>();
+  let idleSince = Date.now();
+  try {
+    while (!stopping) {
+      const next = active.size < PARALLEL ? findRunnableJob() : null;
+      if (!next || active.has(next.carouselId)) {
+        if (!active.size && Date.now() - idleSince > IDLE_EXIT_MS) break;
+        await sleep(1500);
+        continue;
+      }
+      const claimed = claimJob(next.carouselId, next.jobId, PID);
+      if (!claimed) {
+        await sleep(300);
+        continue;
+      }
+      const job = claimed.carousel.job!;
+      if (job.attempts > MAX_ATTEMPTS) {
+        console.log(`${stamp()} ${job.type} ${next.carouselId}: попыток ${job.attempts - 1}, остановлено`);
+        giveUp(next.carouselId, job);
+        idleSince = Date.now();
+        continue;
+      }
+      console.log(`${stamp()} ${job.type} ${next.carouselId}${claimed.resumed ? " — продолжение прерванного" : ""} (одновременно: ${active.size + 1})`);
+      const id = next.carouselId;
+      active.set(id, runOne(id, job).finally(() => {
+        active.delete(id);
+        idleSince = Date.now();
+      }));
+    }
+    // остановка: начатые задания доделываются, новые не берутся
+    await Promise.allSettled([...active.values()]);
+  } finally {
+    clearInterval(lockBeat);
+    releaseRunnerLock(PID);
+    console.log(`${stamp()} обработчик каруселей остановлен`);
+  }
+}
+
+main().then(
+  () => process.exit(0),
+  (e) => {
+    console.error(`${stamp()} обработчик каруселей упал: ${String(e?.stack ?? e).slice(0, 800)}`);
+    releaseRunnerLock(PID);
+    process.exit(1);
+  },
+);

@@ -1,0 +1,5 @@
+# Карусели: компактный выбор стиля, отметка «Опубликована» и просмотры поста из статистики (коммит 23ab11c).
+# Подключается последним, после compose.caption2.yml; откат — без этого файла (before-carousel-pubmark-20261102).
+services:
+  gudini-site:
+    image: gudini-gudini-site:carousel-pubmark-20261102

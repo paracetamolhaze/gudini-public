@@ -1,0 +1,287 @@
+import { mediaComplete, mediaLlmAvailable, scriptTransport } from "./mediaLlm";
+import { ProjectMeta } from "./store";
+import type { StoryResearchPack } from "./storyResearch";
+import { addCost } from "./pipelineCost";
+import { readSpeechProfile, rhythmLine } from "./speechProfile";
+import { EXPLAINER_SYSTEM, isExplainerTopic } from "./explainerScript";
+import { ensureParagraphs } from "./scriptParagraphs";
+import { seriesLine } from "./seriesPlan";
+import { claudeWritesMeta, writeMeta } from "./caption/meta";
+
+/** Блок сценария со ссылкой на факты, которые его подтверждают. */
+export type ScriptBeat = { text: string; factIds: string[] };
+
+// Opus — для сценариев (качество текста = лицо ролика); Sonnet — для утилитарных задач (в разы дешевле)
+const MODEL_SCRIPT = "claude-opus-5";
+const MODEL_UTIL = "claude-sonnet-5";
+
+/**
+ * Есть ли доступ к моделям. Сами запросы идут через общий транспорт
+ * (lib/mediaLlm), поэтому попадают и в политику провайдеров, и в учёт денег —
+ * своего клиента Anthropic здесь больше нет.
+ */
+function haveKey(): boolean {
+  return mediaLlmAvailable();
+}
+
+// ===== Сценарий =====
+
+/**
+ * Модель не знает, какой сегодня день, и её память кончается раньше свежих событий:
+ * сценарий про «Одиссею» Нолана обещал премьеру и трейлер через полтора месяца после
+ * выхода фильма в прокат. Дата передаётся в каждый запрос явно.
+ */
+export function todayLine(now = new Date()): string {
+  const d = now.toISOString().slice(0, 10);
+  return `Сегодня ${d}. Всё, что датировано раньше этого дня, уже произошло.`;
+}
+
+/** Статус истории на сегодня из исследования — одной строкой для промпта. */
+export function statusLine(research: Pick<StoryResearchPack, "status" | "statusNote" | "eventDate">): string {
+  const label: Record<string, string> = {
+    RELEASED: "уже вышел / состоялось",
+    PAST: "уже произошло",
+    ONGOING: "идёт сейчас",
+    UPCOMING: "ещё не вышел / не состоялось",
+  };
+  const st = research.status && label[research.status] ? `${label[research.status]}` : "не установлен";
+  return `Статус на сегодня: ${st}${research.statusNote ? ` — ${research.statusNote}` : ""}${research.eventDate ? ` (дата события ${research.eventDate})` : ""}.`;
+}
+
+const SCRIPT_SYSTEM = `Ты — сценарист вирусных вертикальных видео (TikTok, YouTube Shorts, Instagram Reels).
+Пишешь сценарии, которые автор читает на камеру. Правила:
+- Тема пользователя — задание, которое нужно выполнить, а не повод поговорить о смежном.
+  Сначала определи, какой ответ обещает тема: выбор, сравнение, объяснение, история или новость.
+  «Лучшие X для Y» означает назвать конкретные X и объяснить, почему автор выбирает их для Y.
+  Не подменяй подборку критериями выбора, рекомендацию — инструкцией «как разобраться»,
+  сравнение — общими определениями. Сохраняй заданные период, цель, бюджет и число вариантов.
+  Если в теме выбора число не задано, выдели 2–3 конкретных варианта, которые можно содержательно
+  объяснить за минуту. Не превращай темы-истории и объяснения в подборку без запроса.
+- Это готовый монолог ОТ ЛИЦА АВТОРА для его зрителей, не ответ ассистента заказчику.
+  В теме выбора автор занимает позицию: «я выбираю», «мой выбор» — и даёт основания.
+  В аналитике и прогнозе сформулируй авторский тезис уже в начале: «я ожидаю», «мой прогноз»,
+  «я вижу три причины». Дальше развивай его связной аргументацией. Одного «мой вывод» в конце
+  недостаточно для авторского голоса; при этом не начинай каждую фразу с «я».
+  Если тема уже задаёт позицию автора («почему X вырастет», «почему я выбираю X»), раскрывай
+  именно её, когда факты дают основания. Не заменяй позицию нейтральным обзором возможностей.
+  Формулируй прямо: «мой ориентир к концу года — ...», «я ожидаю ... по трём причинам».
+  Избегай пустого дистанцирования «я рассматриваю это как один из возможных сценариев».
+  Не говори автору, что ему следует сказать или изучить. Не выдумывай личные покупки, владение,
+  доходность или опыт тестирования автора. Оценка и выбор от первого лица допустимы без выдуманной биографии.
+- В хуке обозначь ответ на тему; основная часть раскрывает именно это обещание.
+  Для каждого выбранного варианта назови конкретное преимущество и объясни, почему оно важно
+  для указанной цели и периода. Различай проверяемый факт и вывод автора из него.
+  Аргументы бери из исследования. Будущее обозначай как прогноз автора, установленное — как факт.
+  Такая формулировка уже передаёт статус прогноза; повторять после каждого аргумента отсутствие
+  гарантий не нужно. Если существенное условие меняет вывод, собери его в одном коротком месте
+  и объясни конкретно, что автор отслеживает и когда пересмотрит позицию. Значимые противоречащие
+  данные учитывай в логике вывода, не скрывай их ради уверенного тона.
+  Если тезис нельзя обосновать, сузь сам тезис до подтверждаемого, не выдумывай аргументы.
+- Голос — уверенный эксперт, который объясняет свою позицию живыми словами. В каждом пункте:
+  конкретный факт → понятный механизм → значение для авторского вывода.
+  Убирай ритуальные оговорки «но не гарантия», «не команда расти», «не доказанно лучший»,
+  «лишь возможный сценарий» и повторяющиеся конструкции «это X, а не Y». Они не должны
+  сопровождать каждый довод. Не заменяй их синонимами той же оговорки.
+  Уверенность создаётся точностью и аргументами, а не обещаниями неизбежного результата.
+  Перед ответом перечитай текст как речь на камеру: убери повторяющиеся самоопровержения,
+  канцелярские связки и формальные дисклеймеры. Выдай только окончательный монолог.
+- Исследовательские заметки не зачитываются зрителю: «в выдаче», «в срезе указано», «метаданные
+  противоречат», «не найден первоисточник» — работа редактора, а не содержание ролика.
+  Исключи ненадёжную цифру или неподтверждённый довод и используй подтверждённые основания.
+  Не отвергай кандидат только потому, что о нём мало данных в пакете. Ограничение самого
+  продукта/актива можно объяснить; отсутствие сведений в поиске не является его недостатком.
+- Длительность чтения: 55–65 секунд (примерно 140–160 слов разговорной русской речи).
+- Первые 3 секунды — мощный хук: интригующий вопрос, шокирующий факт или обещание пользы.
+- Разговорный язык, короткие фразы, обращение на «ты», без канцелярита.
+- Структура: хук → 3–4 содержательных пункта или история → вывод → призыв к действию (подписка/комментарий).
+- Никаких ремарок, заголовков и пояснений — только чистый текст для чтения вслух.
+- Тебе сообщают сегодняшнюю дату и короткую справку по теме на сегодня. Пиши по состоянию на
+  сегодня: что уже вышло или произошло — в прошедшем времени, не обещай премьер и релизов,
+  которые уже были. Справка — фон для точности: не пересказывай её и не называй источники.
+- Каждый факт объясняй так, чтобы зритель без контекста понял, о чём речь: не «уходят от схемы
+  управления», а какая схема была и что меняют; не «утечки», а чьи и что в них показали; не
+  «семьдесят деталей», а назови две-три. Намёк без объяснения — брак.
+- Держись темы ролика: тема — сам предмет (игра, фильм, событие), а не его трейлер, файл
+  трейлера или показ; факты о показах — только если они говорят о самом предмете.
+- Если пункты идут списком, скажи об этом в хуке («пять фактов») и нумеруй одинаково.
+- Если в справке нет даты, статуса или цифры — не утверждай, что их «нет» или «не объявлено»;
+  просто не упоминай.`;
+
+const RESEARCH_SCRIPT_SYSTEM = `${SCRIPT_SYSTEM}
+
+ВАЖНО: тебе дают результаты исследования истории — событие, дату, участников и проверенные факты
+со ссылками. Пиши сценарий ТОЛЬКО по ним. Не добавляй существенных утверждений, которых нет в фактах:
+если детали не было в исследовании, её не должно быть в тексте. Имена, числа, даты и названия
+организаций бери из пакета дословно.
+
+Ответь СТРОГО валидным JSON:
+{"script":"полный текст для чтения вслух","beats":[{"text":"предложение из сценария","factIds":["id"]}]}
+beats — разбивка сценария на смысловые блоки в том же порядке, что и в тексте; factIds — какие факты
+подтверждают этот блок (пустой массив для хука, связки или призыва).`;
+
+/** Сценарий из исследования: факты, участники и даты берутся из пакета, а не из памяти модели. */
+export async function generateScriptFromResearch(
+  research: StoryResearchPack,
+): Promise<{ script: string; beats: ScriptBeat[]; demo: boolean } | null> {
+  if (!haveKey()) return null;
+  const facts = research.facts.map((f) => `[${f.id}] ${f.text}`).join("\n");
+  const entities = research.entities.map((e) => `${e.name} (${e.type})`).join(", ");
+  const response = await mediaComplete({
+    model: MODEL_SCRIPT,
+    maxTokens: 16000,
+    stage: "Script Generation",
+    system: RESEARCH_SCRIPT_SYSTEM,
+    user:
+      `${todayLine()}\nИсходная тема пользователя: «${research.topic}»\n${statusLine(research)}\n` +
+      (research.editorialBrief ? `Задача и редакционный вывод (не новые факты): ${research.editorialBrief}\n` : "") +
+      `Событие: ${research.canonicalEvent}\n` +
+      (research.eventDate ? `Дата: ${research.eventDate}\n` : "") +
+      (research.location ? `Место: ${research.location}\n` : "") +
+      `Участники: ${entities}\n\nПроверенные факты:\n${facts}\n\n` +
+      `Краткое изложение: ${research.summary}`,
+  });
+  addCost({ scriptLlmCalls: 1 });
+  const raw = response.replace(/^```(json)?/m, "").replace(/```$/m, "").trim();
+  try {
+    const json = JSON.parse(raw);
+    const script = String(json.script ?? "").trim();
+    if (!script) return null;
+    const known = new Set(research.facts.map((f) => f.id));
+    const beats: ScriptBeat[] = (Array.isArray(json.beats) ? json.beats : [])
+      .map((b: any) => ({
+        text: String(b.text ?? "").trim(),
+        factIds: (Array.isArray(b.factIds) ? b.factIds.map(String) : []).filter((id: string) => known.has(id)),
+      }))
+      .filter((b: ScriptBeat) => b.text.length > 3);
+    return { script, beats, demo: false };
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Справка на сегодня из исследования — фон для точности сценария, а не текст для пересказа:
+ * статус темы (вышел / не вышел) и несколько фактов без ссылок и названий изданий.
+ */
+export function todayBrief(research?: StoryResearchPack | null): string {
+  if (!research) return "";
+  const facts = research.facts.map((f) => `- ${f.text}`).join("\n");
+  const brief = research.editorialBrief ? `Задача и редакционный вывод (проверь по фактам ниже): ${research.editorialBrief}\n` : "";
+  return `${statusLine(research)}\n${brief}Справка на сегодня (факты для конкретных аргументов; источники вслух не называть):\n${facts}`;
+}
+
+/**
+ * Промпт сценариста. Объяснение для новичка идёт по своим правилам и пишется от темы, без
+ * справки исследования: по «Биткоин за минуту» поиск нашёл только руководство по майнингу,
+ * и ролик для новичка ушёл в nonce, награду за блок и майнинг-пулы.
+ */
+export function scriptPrompt(
+  topic: string,
+  research?: StoryResearchPack | null,
+  rhythm = "",
+  kind?: StoryResearchPack["kind"],
+): { system: string; user: string; explainer: boolean } {
+  const explainer = isExplainerTopic(topic, kind ? { kind } : research);
+  const brief = explainer ? "" : todayBrief(research);
+  // место в плане серии: призыв обещает следующий ролик по плану, а не придуманную тему
+  const series = seriesLine(topic);
+  return {
+    system: explainer ? EXPLAINER_SYSTEM : SCRIPT_SYSTEM,
+    user: `${todayLine()}\n${rhythm ? `${rhythm}\n` : ""}${series ? `${series}\n` : ""}${brief ? `${brief}\n\n` : ""}Напиши сценарий ${explainer ? "ролика-объяснения" : "видео"} на тему: «${topic}»`,
+    explainer,
+  };
+}
+
+const TOPIC_KIND_SYSTEM = `Ты помогаешь сценаристу коротких видео понять, что обещает тема. Ответь одним словом:
+EXPLAINER — объяснение понятия, явления, схемы или того, как что-то устроено, включая разбор мифа или ошибки;
+NEWS_EVENT — свежее событие или новость; HISTORY — история из прошлого; PRODUCT — продукт, сервис или выбор
+между вариантами; PERSON — человек; ENTERTAINMENT — фильм, сериал, игра или музыка; OTHER — остальное.`;
+const KINDS = ["EXPLAINER", "NEWS_EVENT", "HISTORY", "PRODUCT", "PERSON", "ENTERTAINMENT", "OTHER"] as const;
+
+/** Тип темы, когда исследования перед сценарием нет: объяснение пишется иначе, чем история или новость. */
+export async function topicKind(topic: string): Promise<NonNullable<StoryResearchPack["kind"]>> {
+  const answer = (await mediaComplete({ stage: "Script Generation", system: TOPIC_KIND_SYSTEM, user: `Тема: «${topic}»` })).toUpperCase();
+  return KINDS.find((k) => answer.includes(k)) ?? "OTHER";
+}
+
+export async function generateScript(topic: string, research?: StoryResearchPack | null): Promise<{ script: string; demo: boolean }> {
+  // Сценарии через мост Claude не зависят от ключей общего транспорта.
+  const claude = scriptTransport() === "claude";
+  if (!claude && !haveKey()) return { script: demoScript(topic), demo: true };
+  // Без исследования Claude сам определяет тип темы, а для историй и новостей проверяет свежие
+  // факты поиском. Объяснению поиск не нужен: справка уводила его в устройство сети.
+  const kind = claude && !research && !isExplainerTopic(topic) ? await topicKind(topic) : undefined;
+  // ритм автора из профиля подачи (темп и длина фраз) — чтобы текст ложился на его речь
+  const { system, user, explainer } = scriptPrompt(topic, research, rhythmLine(readSpeechProfile()), kind);
+  const script = await mediaComplete({
+    model: MODEL_SCRIPT,
+    maxTokens: 16000,
+    stage: "Script Generation",
+    system,
+    user,
+    ...(claude && !research && !explainer ? { claudeTools: "web" as const } : {}),
+  });
+  return { script: ensureParagraphs(script), demo: false };
+}
+
+// ===== Описание и хэштеги =====
+
+// Короткая подпись, заголовок YouTube и 3–5 точных хэштегов пишет lib/caption/meta.
+// Без моделей описание остаётся пустым: шаблонная заглушка уходила бы в соцсети как есть.
+export async function generateMeta(topic: string, script: string, research?: StoryResearchPack | null): Promise<{ meta: ProjectMeta; demo: boolean }> {
+  if (!claudeWritesMeta() && !haveKey()) return { meta: { title: topic, description: "", hashtags: [] }, demo: true };
+  const meta = await writeMeta({ topic, script, facts: research?.facts.map((f) => f.text), today: todayLine() });
+  return { meta, demo: false };
+}
+
+// ===== План б-роллов (перебивок) =====
+
+export type BrollPlan = { from: number; to: number; query: string };
+
+const BROLL_SYSTEM = `Ты — монтажёр коротких вертикальных видео. Тебе дают слова речи с индексами.
+Выбери 5–8 фраз (4–12 подряд идущих слов), которые стоит проиллюстрировать видеоперебивкой (б-роллом):
+конкретные, визуализируемые вещи — места, животные, предметы, действия. Не выбирай абстракции и связки.
+Фразы не должны пересекаться и не должны стоять в самом начале ролика (первые 2 слова — лицо автора).
+Ответь СТРОГО валидным JSON-массивом без пояснений:
+[{"from": индекс_первого_слова, "to": индекс_последнего_слова, "query": "запрос для видеостока на английском, 2-4 слова"}]`;
+
+export async function planBrollSegments(
+  words: { word: string }[],
+  topic: string,
+): Promise<BrollPlan[] | null> {
+  if (!haveKey()) return null;
+  const list = words.map((w, i) => `${i}:${w.word}`).join(" ");
+  const response = await mediaComplete({
+    model: MODEL_UTIL,
+    maxTokens: 16000,
+    stage: "Media Research",
+    system: BROLL_SYSTEM,
+    user: `Тема видео: ${topic}\n\nСлова:\n${list}`,
+  });
+  try {
+    const raw = response.replace(/^```(json)?/m, "").replace(/```$/m, "").trim();
+    const json = JSON.parse(raw);
+    if (!Array.isArray(json)) return null;
+    return json
+      .map((s: any) => ({ from: Number(s.from), to: Number(s.to), query: String(s.query ?? "") }))
+      .filter((s) => Number.isFinite(s.from) && Number.isFinite(s.to) && s.to >= s.from && s.query);
+  } catch {
+    return null;
+  }
+}
+
+// ===== Демо-режим (без API-ключа) =====
+
+function demoScript(topic: string): string {
+  return `Ты точно об этом не знал! Сегодня разберём тему «${topic}» за одну минуту — досмотри до конца, там самое важное.
+
+Первое. Большинство людей понимают «${topic}» неправильно, и из-за этого теряют время и деньги. Правда в том, что всё устроено проще, чем кажется.
+
+Второе. Есть одно правило, которое меняет всё: начинай с малого, но начинай сегодня. Не жди идеального момента — его не будет.
+
+Третье. Самая частая ошибка — слушать тех, кто сам ничего не сделал. Смотри на результаты, а не на слова.
+
+И главный секрет: постоянство бьёт талант. Пятнадцать минут каждый день дадут больше, чем марафон раз в месяц.
+
+Если было полезно — подпишись, дальше будет ещё интереснее. И напиши в комментариях, что думаешь про «${topic}» — читаю всё!`;
+}

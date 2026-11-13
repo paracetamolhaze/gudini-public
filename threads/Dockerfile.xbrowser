@@ -1,0 +1,27 @@
+# Браузер X: отдельный контейнер с Chromium на виртуальном экране. Он хранит вход владельца
+# и выполняет публикации; платный API X здесь не участвует.
+FROM node:22-bookworm-slim
+WORKDIR /app
+
+COPY package.json package-lock.json ./
+RUN npm ci --no-audit --no-fund \
+    && npx playwright install --with-deps chromium \
+    && apt-get update \
+    && apt-get install -y --no-install-recommends xvfb xauth fonts-dejavu-core fonts-liberation \
+    && rm -rf /var/lib/apt/lists/*
+
+COPY . .
+# Git на Windows может отдать скрипт с CRLF, и тогда ядро не находит интерпретатор по первой строке.
+RUN tr -d '\015' < deploy/start-x-browser.sh > /usr/local/bin/start-x-browser \
+    && chmod +x /usr/local/bin/start-x-browser \
+    && npm run build:server
+
+ENV NODE_ENV=production \
+    DATA_DIR=/app/data \
+    X_BROWSER_HEADLESS=false \
+    X_BROWSER_CHANNEL=chromium
+VOLUME ["/app/data"]
+
+# Настоящий браузер на приватном экране: на рабочем столе владельца окно не появляется.
+ENTRYPOINT ["/usr/local/bin/start-x-browser"]
+CMD ["node", "dist/src/xbrowser.js"]

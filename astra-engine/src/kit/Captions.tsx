@@ -1,0 +1,135 @@
+import React, { useMemo } from "react";
+import { AbsoluteFill, interpolate, spring, useVideoConfig } from "remotion";
+import { useInput, type Word } from "../input";
+import { theme } from "../theme";
+import { useOccupied, zonesDuring } from "./layout";
+import { useAbsoluteFrame } from "./time";
+
+export type CaptionPos = "low" | "mid" | "high" | "above-panel" | { y: number };
+export type CaptionStyle = "clean" | "bold" | "minimal";
+
+// above-panel: between the raised author's chin and the top edge of a bottom panel.
+const POS_Y = { low: 1330, mid: 1010, high: 330, "above-panel": 880 } as const;
+
+// The owner's caption: white heavy block capitals with a thick black outline, the same on the author and on a board.
+// The styles differ only in size.
+const BLOCK: React.CSSProperties = { fontFamily: theme.font.text, fontWeight: 900, textTransform: "uppercase", letterSpacing: 0.5, color: "#FFFFFF" };
+const STYLES: Record<CaptionStyle, React.CSSProperties> = {
+  clean: { ...BLOCK, fontSize: 76 },
+  bold: { ...BLOCK, fontSize: 84 },
+  minimal: { ...BLOCK, fontSize: 70 },
+};
+
+/** The black outline is drawn under the white letters, so it thickens them outward instead of eating into them. */
+const outline = (size: number): React.CSSProperties => ({
+  WebkitTextStroke: `${Math.round(size * 0.16)}px #000000`,
+  paintOrder: "stroke fill",
+  textShadow: "0 8px 24px rgba(0,0,0,0.45)",
+});
+
+/** The word as it is shown: punctuation around it goes away, inner hyphens stay (15-летних). */
+export function captionText(word: string): string {
+  return word.replace(/^[\s.,!?…:;"'«»„“”()\[\]—–-]+/, "").replace(/[\s.,!?…:;"'«»„“”()\[\]—–-]+$/, "");
+}
+
+const normalize = (text: string) => captionText(text).toLowerCase().replace(/ё/g, "е");
+
+const SCALE = /^(тыс|тысяч[аи]?|млн|миллион(а|ов)?|млрд|миллиард(а|ов)?|трлн)\.?$/i;
+const NUMBER = /\d/;
+
+/**
+ * Words as they are shown: a number and its scale word are one caption («$84 тыс.»), as they are one amount.
+ * The transcript writes «84 тысячи долларов» as «$84» and «тыс.», and «тыс» alone on screen read as a broken word.
+ */
+function captionWords(words: Word[]): { index: number; text: string; w: Word }[] {
+  const out: { index: number; text: string; w: Word }[] = [];
+  words.forEach((w, index) => {
+    const text = captionText(w.word);
+    const last = out[out.length - 1];
+    if (last && SCALE.test(text) && NUMBER.test(last.text) && w.start - last.w.end < 0.6) {
+      last.text = `${last.text} ${text}`;
+      last.w = { ...last.w, end: w.end };
+      return;
+    }
+    if (text.length > 0) out.push({ index, text, w });
+  });
+  return out;
+}
+
+/** When each word is on screen: from the moment it is said until the next word, with a short hold in pauses. */
+export function wordWindows(words: Word[]): { index: number; text: string; from: number; to: number }[] {
+  const shown = captionWords(words);
+  return shown.map((x, i) => {
+    const next = shown[i + 1]?.w.start ?? Infinity;
+    const hold = Math.min(next, Math.max(x.w.end + 0.35, x.w.start + 0.3));
+    return { index: x.index, text: x.text, from: x.w.start - 0.03, to: next - x.w.end < 0.5 ? next - 0.01 : hold };
+  });
+}
+
+type Props = {
+  style?: CaptionStyle;
+  /** Word indices shown in the accent color and bigger: the words the viewer must catch. */
+  emphasis?: number[];
+  /** Where captions stand during given intervals; elsewhere low, or above a bottom panel. */
+  placements?: { from: number; to: number; pos: CaptionPos }[];
+  /** Intervals without captions. */
+  hidden?: { from: number; to: number }[];
+};
+
+/** One word at a time, centered, appearing exactly when it is said. */
+export const Captions: React.FC<Props> = ({ style = "clean", emphasis = [], placements = [], hidden = [] }) => {
+  const { words } = useInput();
+  const { fps } = useVideoConfig();
+  const frame = useAbsoluteFrame();
+  const occupied = useOccupied();
+  const t = frame / fps;
+  const windows = useMemo(() => wordWindows(words), [words]);
+  const current = windows.find(w => t >= w.from && t < w.to);
+  if (!current) return null;
+  if (hidden.some(h => current.from + 0.03 >= h.from && current.from + 0.03 < h.to)) return null;
+  // A big word on screen already says this word: the caption steps aside instead of repeating it.
+  const digits = current.text.replace(/\D/g, "");
+  const said = occupied.filter(o => o.text && t >= o.from && t < o.to).some(o => normalize(o.text!).split(/\s+/).includes(normalize(current.text))
+    // The same amount written another way: «$84 тыс.» while «$84 000» stands behind the author.
+    || (digits.length >= 2 && o.text!.replace(/\D/g, "").startsWith(digits)));
+  if (said) return null;
+
+  // A picture on the whole screen speaks for itself: no word over it.
+  if (occupied.some(o => o.zone === "full" && t >= o.from && t < o.to)) return null;
+
+  const font = STYLES[style];
+  const strong = emphasis.includes(current.index);
+  const placed = placements.find(p => current.from >= p.from && current.from < p.to)?.pos;
+  // Blocks on screen at any moment while the word is shown: a word said just before a list slides in already stands clear of it.
+  const during = zonesDuring(occupied, current.from, current.to);
+  const zones = during.map(o => o.zone);
+  // A word keeps one place for all its time. It stands on the board line only when the panel is fully open for the
+  // whole word; a word said while the panel slides in or out stays below and never jumps.
+  const wordEnd = Math.min(current.to, current.from + 1.2);
+  const board = occupied.find(o => o.zone === "board" && current.from >= o.from + 0.45 && wordEnd <= o.to - 0.35);
+  // A card or picture in the lower part sends captions above the head; a list that lifted the author puts them on the chest, above the list;
+  // a full-screen graphic has its own caption band.
+  const sheet = during.find(o => o.zone === "sheet");
+  const pos: CaptionPos = placed ?? (board ? { y: board.captionY ?? 1470 } : sheet ? { y: (sheet.top ?? 1100) - 66 } : zones.includes("bottom") ? "high" : zones.includes("card") ? { y: 1500 } : "low");
+  const y = typeof pos === "string" ? POS_Y[pos] : pos.y;
+  const local = frame - Math.round(current.from * fps);
+  const p = spring({ frame: local, fps, config: { damping: 14, stiffness: 260, mass: 0.5 } });
+  const blur = interpolate(local, [0, 3], [6, 0], { extrapolateLeft: "clamp", extrapolateRight: "clamp" });
+  // A word the viewer must catch is bigger; the color stays white everywhere.
+  const size = (font.fontSize as number) * (board ? 0.92 : 1) * (strong ? 1.16 : 1);
+  return (
+    <AbsoluteFill style={{ pointerEvents: "none" }}>
+      <div style={{ position: "absolute", left: 90, right: 90, top: y, translate: "0 -50%", display: "flex", justifyContent: "center" }}>
+        <span style={{
+          ...font,
+          fontSize: size,
+          display: "inline-block", whiteSpace: "nowrap", lineHeight: 1.1,
+          ...outline(size),
+          scale: String(0.82 + 0.18 * p), filter: `blur(${blur}px)`, opacity: Math.min(1, p * 1.6),
+        }}>
+          {current.text}
+        </span>
+      </div>
+    </AbsoluteFill>
+  );
+};

@@ -1,0 +1,5 @@
+# Карусели 8.11: «Срочно» про деньги читателя, без числа месяца в начале (коммит 2f8a728 ветки carousel-sid) — слой поверх
+# gudini-gudini-site:flat-20261108: образ схлопнут, 442 слоя упёрлись в предел. Откат — та же команда up без этого файла (before-carousel-fresh2-20261108).
+services:
+  gudini-site:
+    image: gudini-gudini-site:carousel-fresh2-20261108

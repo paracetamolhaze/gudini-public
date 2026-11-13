@@ -1,0 +1,5 @@
+# После лимита подписки Claude задание каруселей само продолжается через 2 минуты после сброса (коммит ee6bae9).
+# Подключается последним, после compose.styles-fix.yml; откат — без этого файла (before-carousel-limit-20261101).
+services:
+  gudini-site:
+    image: gudini-gudini-site:carousel-limit-20261101

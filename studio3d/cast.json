@@ -1,0 +1,55 @@
+{
+  "me": {
+    "kind": "human",
+    "name": "Ты",
+    "look": {
+      "skin": "#d3a07a",
+      "hair": "#d4c4a3",
+      "hairSides": "#756149",
+      "hairStyle": "crop",
+      "beard": "stubble",
+      "eyes": "#4a3022",
+      "brows": "#4d392b",
+      "glasses": "none",
+      "top": "#f4f4f2",
+      "stripes": "#2a2f45",
+      "topKind": "jersey",
+      "topPrint": "YORK",
+      "pants": "#25272e",
+      "shoes": "#f2f2f2",
+      "chain": true,
+      "lips": "#c47f70",
+      "beardColor": "#6b5545"
+    },
+    "voice": "9tZJ3OSNeIG8jAQ6FQga",
+    "tts": {
+      "model": "eleven_v3",
+      "stability": 0.5,
+      "similarity": 0.8,
+      "seed": 101,
+      "tempo": 1.1,
+      "sts": {
+        "model": "eleven_multilingual_sts_v2",
+        "stability": 0.5,
+        "similarity": 0.9
+      },
+      "loudness": -18
+    }
+  },
+  "claude": {
+    "kind": "blocky",
+    "name": "Клод",
+    "color": "#d97757",
+    "voice": "zvm1P65eFt40xSwMli2k",
+    "tts": {
+      "model": "eleven_v4",
+      "stability": 0.6,
+      "similarity": 0.65,
+      "style": 0,
+      "boost": false,
+      "speed": 0.88,
+      "seed": 101,
+      "loudness": -22
+    }
+  }
+}

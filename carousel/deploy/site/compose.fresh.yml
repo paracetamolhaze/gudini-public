@@ -1,0 +1,5 @@
+# Карусели 8.11: «Срочно» только про событие сегодняшнего или вчерашнего дня (коммит 078af36 ветки carousel-sid) —
+# слой поверх gudini-gudini-site:cover-gpt-20261107. Откат — та же команда up без этого файла (before-carousel-fresh-20261108).
+services:
+  gudini-site:
+    image: gudini-gudini-site:carousel-fresh-20261108

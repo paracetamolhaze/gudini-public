@@ -1,0 +1,39 @@
+"use client";
+
+import { useEffect, useRef } from "react";
+import Link from "next/link";
+import { usePathname } from "next/navigation";
+
+const LINKS = [
+  { href: "/", label: "Проекты", match: (p: string) => p === "/" || p.startsWith("/project/") },
+  { href: "/carousel", label: "Карусели", match: (p: string) => p.startsWith("/carousel") },
+  { href: "/3d", label: "3Д", match: (p: string) => p.startsWith("/3d") },
+  { href: "/trends", label: "Тренды", match: (p: string) => p.startsWith("/trends") },
+  { href: "/balances", label: "Расходы", match: (p: string) => p.startsWith("/balances") },
+  { href: "/settings", label: "Настройки", match: (p: string) => p.startsWith("/settings") },
+];
+
+export default function Nav() {
+  const pathname = usePathname() ?? "/";
+  const ref = useRef<HTMLElement>(null);
+  // на телефоне навигация прокручивается — текущий раздел должен быть виден
+  useEffect(() => {
+    ref.current?.querySelector<HTMLElement>('[aria-current="page"]')?.scrollIntoView({ block: "nearest", inline: "nearest" });
+  }, [pathname]);
+  return (
+    <nav className="topnav" aria-label="Разделы" ref={ref}>
+      {LINKS.map((l) => {
+        const active = l.match(pathname);
+        return (
+          <Link key={l.href} href={l.href} className={`nav-link${active ? " active" : ""}`} aria-current={active ? "page" : undefined}>
+            {l.label}
+          </Link>
+        );
+      })}
+      {/* Threads — тоже отдельный сервис (контейнер threads-app), сайт проксирует /threads */}
+      <a href="/threads/" className="nav-link">
+        Threads
+      </a>
+    </nav>
+  );
+}

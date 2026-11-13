@@ -1,0 +1,228 @@
+/*
+ * Этап «Публикация» скетча «3Д»: карточки слева от превью ролика, как публикация основного проекта. Только
+ * токены, которые есть и в прод-версии globals.css, и в ветке, — с запасными значениями.
+ */
+
+.panel {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+  min-width: 0;
+}
+.panel :global(.card) {
+  margin-bottom: 0;
+}
+.panel :global(.error-box),
+.panel :global(.warn-box) {
+  margin: 0;
+}
+.panel h2 {
+  margin: 0;
+}
+
+.head {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px 10px;
+  margin-bottom: 10px;
+}
+.head h2 {
+  flex: 1 1 auto;
+}
+
+/* ===== Обложка ===== */
+.cover {
+  display: grid;
+  grid-template-columns: 80px minmax(0, 1fr);
+  gap: 12px;
+  align-items: start;
+}
+.coverImg,
+.coverEmpty {
+  display: block;
+  width: 80px;
+  aspect-ratio: 9 / 16;
+  border-radius: 8px;
+  border: 1px solid var(--border, #36363e);
+  background: #0b0b0d;
+  object-fit: cover;
+}
+.coverEmpty {
+  display: grid;
+  place-items: center;
+  color: var(--text-dim, #b6b2bd);
+  font-size: 12px;
+  text-align: center;
+  padding: 6px;
+}
+.coverInfo {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  min-width: 0;
+  font-size: 13px;
+  line-height: 1.45;
+}
+.headline {
+  font-weight: 650;
+  overflow-wrap: anywhere;
+}
+.dim {
+  color: var(--text-dim, #b6b2bd);
+  font-size: 13px;
+  line-height: 1.45;
+  overflow-wrap: anywhere;
+}
+.warn {
+  color: var(--warn, #f0c36a);
+  font-size: 13px;
+  line-height: 1.45;
+}
+.buttons {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+.headlineForm {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  margin-top: 12px;
+}
+.headlineForm input {
+  width: 100%;
+}
+.note {
+  margin: 10px 0 0;
+}
+.reason {
+  margin-top: 10px;
+  display: -webkit-box;
+  -webkit-line-clamp: 3;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+}
+
+/* ===== Описание ===== */
+.fields {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+.fields :global(.field) {
+  margin-top: 0;
+}
+.fields :global(.field) > span {
+  margin-bottom: 4px;
+}
+/* длинное описание свёрнуто до пяти строк и раскрывается, пока его правят */
+.fields textarea {
+  resize: none;
+  overflow: hidden;
+  min-height: 72px;
+  max-height: 156px;
+}
+.fields textarea:not(:focus) {
+  overflow-y: auto;
+}
+.fields textarea:focus {
+  max-height: none;
+}
+.fields input,
+.fields textarea {
+  width: 100%;
+}
+/* счётчик знаков — в строке подписи, а не отдельной строкой под полем */
+.fields .label {
+  display: flex;
+  justify-content: space-between;
+  gap: 8px;
+}
+.counter {
+  font-size: 12px;
+  color: var(--text-dim, #b6b2bd);
+  font-variant-numeric: tabular-nums;
+}
+.over {
+  color: var(--error, #ef9b99);
+  font-weight: 600;
+}
+
+/* ===== Площадки ===== */
+.platforms {
+  display: flex;
+  flex-direction: column;
+  border-top: 1px solid var(--border, #36363e);
+}
+.platform {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 10px 0;
+  border-bottom: 1px solid var(--border, #36363e);
+  min-width: 0;
+}
+.platformHead {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 6px 10px;
+}
+.platformName {
+  font-weight: 600;
+  font-size: 15px;
+  flex: 1 1 auto;
+}
+.result {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 6px 10px;
+  font-size: 13px;
+}
+.check {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 14px;
+  cursor: pointer;
+}
+.check input {
+  width: 18px;
+  height: 18px;
+  margin: 0;
+}
+.schedule {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.schedule input {
+  width: 100%;
+  min-height: 44px;
+  padding: 10px 12px;
+  border: 1px solid var(--border, #36363e);
+  border-radius: var(--radius, 12px);
+  background: var(--bg-input, #25252b);
+  color: var(--text, #f3f0eb);
+  font: inherit;
+}
+.all {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  margin-top: 14px;
+}
+.notes {
+  margin: 0;
+  padding-left: 18px;
+  font-size: 13px;
+  line-height: 1.5;
+}
+
+@media (max-width: 600px) {
+  .buttons :global(.btn) {
+    flex: 1 1 auto;
+  }
+}

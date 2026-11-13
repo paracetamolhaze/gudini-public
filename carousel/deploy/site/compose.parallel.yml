@@ -1,0 +1,5 @@
+# Карусели 7.11: до трёх заданий одновременно, тепловая карта «Кино» на всю картинку (коммит d7abc4c ветки carousel-sid) —
+# слой поверх gudini-gudini-site:opus-20261107. Откат — та же команда up без этого файла (before-carousel-parallel-20261107).
+services:
+  gudini-site:
+    image: gudini-gudini-site:carousel-parallel-20261107

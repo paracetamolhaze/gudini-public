@@ -1,0 +1,13 @@
+node_modules/
+.work/
+out/
+public/asset-cache/
+public/sounds/
+public/music/
+public/dev/
+deploy/site/build/
+# the owner's style reference for the target frame: his files, only the README is ours
+style-ref/*
+!style-ref/README.md
+# Obelix Pro is free for personal use only: it goes into the image, not into this public repository.
+public/fonts/ObelixPro*

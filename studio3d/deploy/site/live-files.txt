@@ -1,0 +1,33 @@
+# Копии ЖИВЫХ файлов основной папки C:\Users\user\Desktop\gudini (её незакоммиченная рабочая копия — то,
+# что сейчас работает на сайте), положенные в этот worktree только для проверки типов и тестов публикации «3Д».
+#
+# НЕ КОММИТИТЬ и не править: на сайт они не уходят. Слой сайта (prepare.sh) общие файлы сам берёт из
+# основной папки в момент сборки, а правки «3Д» (скрыть зеркала из списка проектов, ссылки зеркал на странице
+# публикаций → /3d/<id>) накладывает patch-live.mjs с проверкой; правки живут только там (почему — README.md).
+# Перед коммитом ветки: git checkout HEAD -- <файлы ниже> и git clean для новых (отмечены «новый»).
+#
+# lib/publications.ts сюда НЕ скопирован: он тянет за собой живой код каруселей. Его правку проверяет сборка
+# образа — tests/studio3dPublish.test.ts («страница публикаций…») идёт против файла образа и в worktree пропускается.
+#
+# Скопировано 2026-10-22 (lib/studio3d/publish.ts, cover.ts, meta.ts используют их напрямую или через импорты).
+
+app/api/projects/route.ts      # + та же правка, что делает patch-live.mjs (скрыть зеркала «3Д»)
+lib/ai.ts
+lib/aiFilm/types.ts
+lib/astra/types.ts             # новый
+lib/brollWeb.ts
+lib/codexLlm.ts
+lib/costLedger.ts
+lib/imageSearch.ts             # новый
+lib/instagramResponse.ts       # новый
+lib/newsSearch.ts              # новый
+lib/providerPolicy.ts
+lib/publicFetch.ts             # новый
+lib/publicationHistory.ts      # новый
+lib/publicationSchedule.ts     # новый
+lib/publish.ts
+lib/spendLog.ts
+lib/store.ts
+lib/storyResearch.ts
+lib/tiktok/state.ts
+middleware.ts

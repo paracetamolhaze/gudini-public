@@ -1,0 +1,262 @@
+/*
+ * Раздел «Тренды». Только токены, которые есть и в прод-версии globals.css, и в ветке, — с запасными
+ * значениями: страница должна выглядеть одинаково в обеих.
+ */
+
+.page {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+  max-width: 1040px;
+  width: 100%;
+  margin-inline: auto;
+  min-width: 0;
+}
+.page :global(.card) {
+  margin-bottom: 0;
+}
+.page :global(.page-head) {
+  margin-bottom: 0;
+}
+.page :global(.page-sub) {
+  margin-top: 6px;
+  max-width: 72ch;
+}
+.page :global(details) summary {
+  cursor: pointer;
+  color: var(--text-dim, #9aa3b2);
+  font-size: 14px;
+  padding: 6px 0;
+}
+
+/* ===== Темы ===== */
+.tabs {
+  display: flex;
+  gap: 6px;
+  flex-wrap: wrap;
+}
+.tab {
+  border: 1px solid var(--border, #2a2f3a);
+  background: transparent;
+  color: var(--text-dim, #9aa3b2);
+  border-radius: 999px;
+  padding: 8px 16px;
+  font-size: 15px;
+  cursor: pointer;
+}
+.tab[aria-selected="true"] {
+  background: var(--accent-soft, #6d8bff26);
+  border-color: var(--accent, #6d8bff);
+  color: var(--text, #e8ebf1);
+}
+
+/* ===== Прогон и вход ===== */
+.panel {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+.browserRow,
+.runRow,
+.progressRow {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  flex-wrap: wrap;
+}
+.browserText {
+  flex: 1 1 280px;
+  min-width: 0;
+}
+.progressRow > span:first-child {
+  flex: 1 1 240px;
+}
+.login {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+.loginFrame {
+  width: 100%;
+  max-width: 960px;
+  border-radius: var(--radius, 8px);
+  cursor: pointer;
+  border: 1px solid var(--border, #2a2f3a);
+}
+.summary {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  border-top: 1px solid var(--border, #2a2f3a);
+  padding-top: 12px;
+}
+.formulas {
+  display: flex;
+  flex-wrap: wrap;
+}
+.tableWrap {
+  overflow-x: auto;
+  max-width: 100%;
+}
+.table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 14px;
+}
+.table th,
+.table td {
+  text-align: left;
+  padding: 6px 8px;
+  border-bottom: 1px solid var(--border, #2a2f3a);
+  vertical-align: top;
+}
+.table th {
+  color: var(--text-dim, #9aa3b2);
+  font-weight: 500;
+}
+.readError {
+  color: var(--warn, #e0b354);
+  font-size: 13px;
+}
+.nowrap {
+  white-space: nowrap;
+}
+
+/* ===== Аккаунты ===== */
+.accounts {
+  list-style: none;
+  display: flex;
+  flex-direction: column;
+}
+.account {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 10px 0;
+  border-bottom: 1px solid var(--border, #2a2f3a);
+  flex-wrap: wrap;
+}
+.account[data-proposed] {
+  background: linear-gradient(90deg, var(--warn-soft, #e0b35414), transparent 60%);
+}
+.accountMain {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  flex: 1 1 320px;
+  min-width: 0;
+}
+.accountName {
+  display: flex;
+  align-items: baseline;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+.accountName a {
+  text-decoration: underline;
+  text-underline-offset: 3px;
+}
+.accountName :global(.chip) {
+  margin: 0;
+}
+.yt {
+  color: var(--text-dim, #9aa3b2);
+  font-size: 14px;
+}
+.addForm {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr)) auto;
+  gap: 10px;
+  align-items: end;
+}
+.addForm :global(.field) {
+  margin: 0;
+}
+@media (max-width: 720px) {
+  .addForm {
+    grid-template-columns: minmax(0, 1fr);
+  }
+}
+
+/* ===== Карточки ===== */
+.cards {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+}
+.trend {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  min-width: 0;
+}
+.trendHead {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  flex-wrap: wrap;
+}
+.multiple {
+  font-size: 28px;
+  font-weight: 700;
+  color: var(--accent, #6d8bff);
+  line-height: 1;
+}
+.trendMeta {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+}
+.frames {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 120px));
+  gap: 8px;
+}
+.frames img {
+  width: 100%;
+  aspect-ratio: 9 / 16;
+  object-fit: cover;
+  border-radius: 8px;
+  background: var(--bg-input, #1b1f27);
+}
+.analysis,
+.idea {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+.idea {
+  border-top: 1px solid var(--border, #2a2f3a);
+  padding-top: 12px;
+}
+.idea h3 {
+  font-size: 17px;
+}
+.hook {
+  font-size: 17px;
+}
+.structure,
+.hooks {
+  margin: 0 0 0 20px;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+.hooks li[data-chosen] {
+  font-weight: 600;
+}
+.screen {
+  display: inline-block;
+  margin-left: 8px;
+  padding: 1px 8px;
+  border-radius: 4px;
+  background: var(--bg-input, #1b1f27);
+  font-size: 13px;
+  font-weight: 700;
+  letter-spacing: 0.02em;
+}
+.script {
+  white-space: pre-wrap;
+  line-height: 1.6;
+  max-width: 68ch;
+}

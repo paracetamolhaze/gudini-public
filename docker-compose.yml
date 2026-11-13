@@ -1,0 +1,257 @@
+# Гудини целиком на этом компьютере: сайт + воркер монтажа + HTTPS через DuckDNS.
+#
+#   docker compose up -d --build                    # сайт и воркер; сайт на http://localhost:3000
+#   docker compose --profile public up -d --build   # плюс Caddy (HTTPS) и обновление DuckDNS
+#
+# Настройки — в .env: GUDINI_PASSWORD (пароль входа), ключи ИИ, для публичного доступа —
+# DOMAIN (xxx.duckdns.org), DUCKDNS_SUBDOMAIN (xxx), DUCKDNS_TOKEN, SITE_URL (https://xxx.duckdns.org).
+# Данные сайта (проекты, загрузки, готовые ролики) живут в томе gudini-site-data,
+# данные воркера — в gudini-worker-data. Лимита на объём нет: это ваш диск.
+services:
+  gudini-site:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: gudini-site
+    restart: unless-stopped
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    dns:
+      - 1.1.1.1
+      - 8.8.8.8
+    env_file: .env
+    environment:
+      PORT: "3000"
+      # Codex runs on Windows with the owner's ChatGPT login; credentials stay on the host.
+      CODEX_BRIDGE_URL: http://host.docker.internal:43127
+      CODEX_IMAGE_BRIDGE_URL: http://host.docker.internal:43129
+      # Один обязательный пароль для всех рабочих разделов.
+      SITE_PASSWORD: ${SITE_PASSWORD:?SITE_PASSWORD must be set for the shared site login}
+      # монтаж только на воркере: сайт не запускает конвейер у себя, если воркер молчит
+      WORKER_ONLY: "1"
+      # адрес, по которому сайт виден снаружи: нужен OAuth-коллбэкам и Instagram Reels
+      PUBLIC_BASE_URL: ${SITE_URL:-http://localhost:3000}
+      # раздел /threads: то же для контейнера threads-app
+      THREADS_URL: http://threads-app:8600
+      TIKTOK_TRANSPORT: browser
+      TIKTOK_BROWSER_URL: http://tiktok-browser:43128
+      # раздел /trends: браузер Instagram и прогоны трендов — контейнер ig-browser
+      IG_BROWSER_URL: http://ig-browser:43137
+    ports:
+      # только с этого компьютера; из интернета — через caddy
+      - "127.0.0.1:3000:3000"
+    volumes:
+      - gudini-site-data:/app/data
+
+  tiktok-browser:
+    build:
+      context: .
+      dockerfile: Dockerfile.tiktok
+    container_name: gudini-tiktok-browser
+    restart: unless-stopped
+    command: ["npm", "run", "worker:tiktok"]
+    env_file: .env
+    environment:
+      TIKTOK_TRANSPORT: browser
+      TIKTOK_BROWSER_HOST: "0.0.0.0"
+    volumes:
+      - gudini-site-data:/app/data
+    shm_size: "1gb"
+
+  # «Тренды»: свой Chromium с входом владельца в Instagram, чтение лент по кнопке, разбор выбросов.
+  # Без видеокарты: кадры и звук режет ffmpeg на процессоре, Claude и Codex — через мосты на Windows.
+  ig-browser:
+    build:
+      context: .
+      dockerfile: Dockerfile.ig
+    container_name: gudini-ig-browser
+    restart: unless-stopped
+    init: true
+    command: ["npm", "run", "worker:ig"]
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    env_file: .env
+    environment:
+      IG_BROWSER_HOST: "0.0.0.0"
+      CODEX_BRIDGE_URL: http://host.docker.internal:43127
+    volumes:
+      - gudini-site-data:/app/data
+    shm_size: "1gb"
+
+  gudini-worker:
+    build:
+      context: .
+      dockerfile: Dockerfile.worker
+    container_name: gudini-worker
+    restart: unless-stopped
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    dns:
+      - 1.1.1.1
+      - 8.8.8.8
+    env_file: .env
+    environment:
+      # воркер ходит на сайт по внутренней сети Docker, исходник не гоняется через интернет
+      GUDINI_URL: http://gudini-site:3000
+      CODEX_BRIDGE_URL: http://host.docker.internal:43127
+      # AI-фильм: Veo на Vertex AI через учётные данные gcloud (application-default login);
+      # ключей в .env нет, файл смонтирован только для чтения
+      GOOGLE_APPLICATION_CREDENTIALS: /app/gcp-adc.json
+      # Астра монтирует на движке Remotion (astra-engine); без ASTRA_ENGINE работает прежняя Астра.
+      ASTRA_ENGINE: remotion
+      ASTRA_PYTHON: python3
+      ASTRA_RVM_MODEL: /app/astra-engine/matting/rvm_mobilenetv3_fp32.onnx
+      # Астра смотрит кадры своего черновика и правит монтаж до финального рендера (+2–3 минуты).
+      ASTRA_REVIEW: "1"
+      # Два ролика сразу: пока один рендерится, следующий пишется и иллюстрируется.
+      WORKER_CONCURRENCY: "2"
+    depends_on:
+      - gudini-site
+    volumes:
+      - gudini-worker-data:/app/data
+      - ${GCLOUD_ADC_FILE:-./data/gcp-adc-missing.json}:/app/gcp-adc.json:ro
+    # Chromium рендера Астры держит кадры в общей памяти
+    shm_size: "2gb"
+
+  # --- Threads, раздел /threads: автономный русскоязычный крипто-аккаунт в Threads (threads/) ---
+  # Обособленный сервис: свои Postgres и Redis, один образ для API+dashboard (app) и очередей (worker).
+  # Секреты и ключи — в threads/.env (см. threads/.env.example); адреса БД подставляются здесь.
+  threads-app:
+    build:
+      context: ./threads
+    container_name: gudini-threads-app
+    restart: unless-stopped
+    env_file:
+      - path: ./threads/.env
+        required: false
+    environment:
+      PORT: "8600"
+      DATABASE_URL: postgres://threads:change-me@threads-postgres:5432/threads
+      REDIS_URL: redis://threads-redis:6379
+      SITE_PASSWORD: ${SITE_PASSWORD:?SITE_PASSWORD must be set for the shared site login}
+      # Публичный адрес сайта задаётся в корневом .env (SITE_URL). Пусто — честнее, чем localhost:
+      # по localhost Threads всё равно не скачает карточку, а непустая строка красит проверку в зелёный.
+      PUBLIC_BASE_URL: ${SITE_URL:-}
+      DATA_DIR: /app/data
+      X_BROWSER_URL: http://x-browser:43132
+    ports:
+      # Внешний доступ только через общий HTTPS-вход Caddy.
+      - "127.0.0.1:8600:8600"
+    volumes:
+      - threads-data:/app/data
+    depends_on:
+      threads-postgres:
+        condition: service_healthy
+      threads-redis:
+        condition: service_started
+
+  threads-worker:
+    build:
+      context: ./threads
+    container_name: gudini-threads-worker
+    restart: unless-stopped
+    command: ["node", "dist/src/worker.js"]
+    env_file:
+      - path: ./threads/.env
+        required: false
+    environment:
+      # Shared key is required to decrypt the account connected through the web app.
+      SITE_PASSWORD: ${SITE_PASSWORD:?SITE_PASSWORD must be set for the shared site login}
+      DATABASE_URL: postgres://threads:change-me@threads-postgres:5432/threads
+      REDIS_URL: redis://threads-redis:6379
+      # Публичный адрес сайта задаётся в корневом .env (SITE_URL). Пусто — честнее, чем localhost:
+      # по localhost Threads всё равно не скачает карточку, а непустая строка красит проверку в зелёный.
+      PUBLIC_BASE_URL: ${SITE_URL:-}
+      DATA_DIR: /app/data
+      X_BROWSER_URL: http://x-browser:43132
+    volumes:
+      - threads-data:/app/data
+    depends_on:
+      threads-postgres:
+        condition: service_healthy
+      threads-redis:
+        condition: service_started
+
+  # Браузер X: настоящий Chromium на виртуальном экране хранит вход владельца и публикует посты.
+  # Ключи разработчика X не нужны, за чтение чужих постов никто не выставляет счёт.
+  x-browser:
+    build:
+      context: ./threads
+      dockerfile: Dockerfile.xbrowser
+    container_name: gudini-x-browser
+    restart: unless-stopped
+    # Node в роли PID 1 не забирает завершившиеся процессы Chromium: за час копилась тысяча зомби.
+    init: true
+    env_file:
+      - path: ./threads/.env
+        required: false
+    environment:
+      DATA_DIR: /app/data
+      X_BROWSER_HOST: "0.0.0.0"
+      TIMEZONE: ${TIMEZONE:-Europe/Moscow}
+    volumes:
+      - threads-data:/app/data
+    shm_size: "1gb"
+
+  threads-postgres:
+    image: postgres:17-alpine
+    container_name: gudini-threads-postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: threads
+      POSTGRES_PASSWORD: change-me
+      POSTGRES_DB: threads
+    volumes:
+      - threads-pg-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U threads -d threads"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+
+  threads-redis:
+    image: redis:7-alpine
+    container_name: gudini-threads-redis
+    restart: unless-stopped
+    command: ["redis-server", "--appendonly", "yes"]
+    volumes:
+      - threads-redis-data:/data
+
+  # --- публичный HTTPS: включается профилем `public`, когда домен и проброс порта готовы ---
+  caddy:
+    profiles: ["public"]
+    build: ./deploy/caddy
+    container_name: gudini-caddy
+    restart: unless-stopped
+    environment:
+      DOMAIN: ${DOMAIN:-}
+      DUCKDNS_TOKEN: ${DUCKDNS_TOKEN:-}
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./deploy/caddy/Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy-data:/data
+      - caddy-config:/config
+    depends_on:
+      - gudini-site
+
+  duckdns:
+    profiles: ["public"]
+    image: lscr.io/linuxserver/duckdns:latest
+    container_name: gudini-duckdns
+    restart: unless-stopped
+    environment:
+      SUBDOMAINS: ${DUCKDNS_SUBDOMAIN:-}
+      TOKEN: ${DUCKDNS_TOKEN:-}
+      UPDATE_IP: ipv4
+      LOG_FILE: "false"
+
+volumes:
+  gudini-site-data:
+  gudini-worker-data:
+  threads-data:
+  threads-pg-data:
+  threads-redis-data:
+  caddy-data:
+  caddy-config:

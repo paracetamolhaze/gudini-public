@@ -1,0 +1,5 @@
+# Карусели 12.11: «Срочно» простыми словами, одна мысль на слайд, добивка — факт (коммит ветки carousel-sid после 12b7cf6).
+# Слой поверх gudini-gudini-site:news-rework-20261111b → carousel-plain-20261112. Откат — та же команда up без этого файла (before-carousel-plain-20261112).
+services:
+  gudini-site:
+    image: gudini-gudini-site:carousel-plain3-20261112

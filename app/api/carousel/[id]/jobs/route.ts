@@ -1,0 +1,91 @@
+import { NextRequest } from "next/server";
+import { fail, guard, ok, readBody } from "@/lib/carousel/http";
+import { attachJob, CarouselError, updateCarousel, getCarousel } from "@/lib/carousel/store";
+import { CAROUSEL_LIMITS } from "@/lib/carousel/limits";
+import { cleanText } from "@/lib/carousel/text";
+import { toClient } from "@/lib/carousel/view";
+import { ensureRunner } from "@/lib/carousel/runnerControl";
+import { configProblems, textConfigProblems } from "@/lib/carousel/config";
+import { sidConfigProblems } from "@/lib/carousel/sid/claude";
+
+export const dynamic = "force-dynamic";
+
+type Ctx = { params: Promise<{ id: string }> };
+
+const TYPES = ["generate", "render", "regenerate_slide", "instruct", "images", "image"] as const;
+const PAID = new Set(["generate", "regenerate_slide", "instruct", "images", "image"]);
+
+/**
+ * Фоновые задания над каруселью: повтор генерации, сборка карточек, перегенерация слайда,
+ * правка по текстовому поручению, недостающие иллюстрации, новая иллюстрация или правка
+ * картинки одного слайда. Публикация — отдельным маршрутом.
+ */
+export async function POST(req: NextRequest, { params }: Ctx) {
+  const denied = guard(req);
+  if (denied) return denied;
+  try {
+    const { id } = await params;
+    const body = await readBody(req);
+    const type = body.type as (typeof TYPES)[number];
+    if (!TYPES.includes(type)) return ok({ error: "Неизвестное задание" }, 400);
+    if (PAID.has(type)) {
+      const current = getCarousel(id);
+      const needsImages = type === "images" || type === "image" || (type === "generate" && current?.mode === "illustrated") || (type === "regenerate_slide" && body.withImage === true && current?.mode === "illustrated");
+      const problems = current?.schema === 4 ? sidConfigProblems() : needsImages ? configProblems() : textConfigProblems();
+      if (problems.length) return ok({ error: problems.join(" "), code: "config" }, 400);
+    }
+
+    const c = updateCarousel(id, (x) => {
+      if (x.publish.status === "queued" || x.publish.status === "running") throw new CarouselError("Идёт публикация — дождитесь её окончания", 409, "publishing");
+
+      if (type === "generate") {
+        // только повтор неудавшейся генерации: готовые тексты второй раз не заказываются
+        const planned = x.slides.length > 0;
+        // карусель формата раздела продолжает с шага, на котором остановилась
+        if (x.schema === 4) {
+          if (!(x.job?.type === "generate" && x.job.state === "error")) throw new CarouselError("Карусель уже собрана", 409, "already_generated");
+          attachJob(x, "generate");
+          return;
+        }
+        if (planned && !(x.job?.type === "generate" && x.job.state === "error")) {
+          throw new CarouselError("Карусель уже сгенерирована — правьте слайды или дайте поручение GPT", 409, "already_generated");
+        }
+        attachJob(x, "generate", planned ? { stage: "planned" } : {});
+        return;
+      }
+
+      if (typeof body.revision !== "number" || body.revision !== x.revision) {
+        throw new CarouselError("Карусель изменилась после загрузки страницы — обновите страницу", 409, "stale_revision");
+      }
+      if (!x.slides.length) throw new CarouselError("Сначала дождитесь генерации слайдов", 409, "no_slides");
+      if (x.schema === 4) throw new CarouselError("Слайды этой карусели собраны целиком — их не правят по отдельности", 400, "bad_mode");
+
+      if (type === "render") attachJob(x, "render");
+      else if (type === "images") {
+        if (x.mode !== "illustrated") throw new CarouselError("У текстовой карусели нет иллюстраций", 400, "bad_mode");
+        const slideIds = Array.isArray(body.slideIds) ? body.slideIds.filter((s: unknown) => x.slides.some((y) => y.id === s)) : [];
+        attachJob(x, "images", { slideIds, includeUncertain: body.includeUncertain === true });
+      } else if (type === "image") {
+        if (x.mode !== "illustrated") throw new CarouselError("У текстовой карусели нет иллюстраций", 400, "bad_mode");
+        if (!x.slides.some((s) => s.id === body.slideId)) throw new CarouselError("Слайд не найден — обновите страницу", 404, "slide_missing");
+        const edit = body.mode === "edit";
+        const instruction = edit ? cleanText(body.instruction, { max: CAROUSEL_LIMITS.instructionMax }) : "";
+        if (edit && instruction.length < 3) throw new CarouselError("Напишите, что изменить в картинке, например «сделай светлее»", 400, "bad_instruction");
+        attachJob(x, "image", { slideId: body.slideId, mode: edit ? "edit" : "regenerate", instruction: edit ? instruction : undefined, hint: edit ? undefined : cleanText(body.hint, { max: CAROUSEL_LIMITS.hintMax }) });
+      } else if (type === "regenerate_slide") {
+        if (!x.slides.some((s) => s.id === body.slideId)) throw new CarouselError("Слайд не найден — обновите страницу", 404, "slide_missing");
+        attachJob(x, "regenerate_slide", { slideId: body.slideId, hint: cleanText(body.hint, { max: CAROUSEL_LIMITS.hintMax }), withImage: body.withImage === true });
+      } else {
+        const instruction = cleanText(body.instruction, { multiline: true });
+        if (instruction.length < 3) throw new CarouselError("Напишите поручение, например «сократи третий слайд»", 400, "bad_instruction");
+        if (instruction.length > CAROUSEL_LIMITS.instructionMax) throw new CarouselError(`Поручение длиннее ${CAROUSEL_LIMITS.instructionMax} символов`, 400, "bad_instruction");
+        attachJob(x, "instruct", { instruction });
+      }
+    });
+    ensureRunner();
+    return ok(toClient(c), 202);
+  } catch (e) {
+    return fail(e);
+  }
+}
+

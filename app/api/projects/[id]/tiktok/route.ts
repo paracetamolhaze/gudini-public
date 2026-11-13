@@ -1,0 +1,32 @@
+import { NextRequest, NextResponse } from "next/server";
+import { getProject } from "@/lib/store";
+import { coverLeadSec, tiktokCreatorInfo, tiktokDirectPostEnabled } from "@/lib/publish";
+import { browserTikTokEnabled, readTikTokState } from "@/lib/tiktok/state";
+import { socialCaption } from "@/lib/caption/text";
+
+type Ctx = { params: Promise<{ id: string }> };
+
+/**
+ * Данные для экрана публикации в TikTok: режим (черновик или прямая публикация),
+ * автор и разрешённые ему настройки из creator_info, подпись по умолчанию и кадр обложки.
+ * TikTok требует показывать это перед публикацией — иначе аудит Direct Post не пройти.
+ */
+export async function GET(_req: NextRequest, { params }: Ctx) {
+  const { id } = await params;
+  const project = getProject(id);
+  if (!project) return NextResponse.json({ error: "Проект не найден" }, { status: 404 });
+  if (browserTikTokEnabled()) return NextResponse.json({ browser: true, direct: false, connected: readTikTokState().connected });
+
+  const direct = tiktokDirectPostEnabled();
+  const caption = socialCaption(project.meta, project.topic).slice(0, 2200);
+  // обложка вставляется первым кадром — превью с нулевой секунды и есть своя обложка
+  const coverSec = project.cover && coverLeadSec() > 0 ? 0 : (project.coverOffsetSec ?? 1);
+  if (!direct) return NextResponse.json({ direct, connected: false, creator: null, caption, coverSec });
+
+  try {
+    const creator = await tiktokCreatorInfo();
+    return NextResponse.json({ direct, connected: Boolean(creator), creator, caption, coverSec });
+  } catch (e: any) {
+    return NextResponse.json({ direct, connected: false, creator: null, caption, coverSec, error: String(e?.message ?? e) });
+  }
+}

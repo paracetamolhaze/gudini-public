@@ -1,0 +1,5 @@
+# Карусели «Расследование» 3.11: тема про деньги самого читателя (коммит d44a290 ветки carousel-sid) — слой поверх
+# gudini-gudini-site:news-night-20261102. Откат — та же команда up без этого файла (before-carousel-topic-20261103).
+services:
+  gudini-site:
+    image: gudini-gudini-site:carousel-topic-20261103

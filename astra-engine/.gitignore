@@ -1,0 +1,9 @@
+node_modules/
+public/dev/
+public/asset-cache/
+public/sounds/
+out/
+dev/
+.work/
+# Obelix Pro is free for personal use only: it goes into the worker image, not into this public repository.
+public/fonts/ObelixPro*
